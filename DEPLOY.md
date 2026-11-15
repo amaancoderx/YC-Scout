@@ -16,16 +16,18 @@ You need: a GitHub account (the repo), a Google account (Gmail), about 20 minute
 ## 1. Create the cloud database (Turso, free)
 
 1. Go to [turso.tech](https://turso.tech) and sign up with GitHub.
-2. **Create database**: name `yc-scout`, location **AWS US West (Oregon)** (same region as the Render service, so it is fast).
-3. Open the database and copy its **URL** (looks like `libsql://yc-scout-<you>.aws-us-west-2.turso.io`).
+2. **Create database**: name `yc-scout`, location **AWS AP SouthEast (Singapore)**. It must be in the same region as the Render service (Singapore in `render.yaml`, the closest Render region to India) so every query is fast.
+3. Open the database and copy its **URL** (looks like `libsql://yc-scout-<you>.aws-ap-southeast-1.turso.io`).
 4. **Create token** (read and write, no expiry) and copy it.
+
+> Living somewhere else? Pick the Render region closest to you (Oregon, Ohio, Virginia, Frankfurt or Singapore) in `render.yaml`, and the Turso location in the same place.
 
 ## 2. Copy your current data into it
 
 On your computer, add the two values to `.env`:
 
 ```
-TURSO_DATABASE_URL=libsql://yc-scout-<you>.aws-us-west-2.turso.io
+TURSO_DATABASE_URL=libsql://yc-scout-<you>.aws-ap-southeast-1.turso.io
 TURSO_AUTH_TOKEN=<token>
 ```
 
