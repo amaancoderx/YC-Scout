@@ -276,7 +276,9 @@ class _Row(tuple):
 class _Cursor:
     def __init__(self, cur):
         self._cur = cur
-        self._names = tuple(d[0] for d in (cur.description or ()))
+        # SQLite names are case-insensitive; Turso can return a column as declared (e.g. KEY).
+        # Every column and alias in this app is lowercase, so normalise to that.
+        self._names = tuple(str(d[0]).lower() for d in (cur.description or ()))
 
     def fetchall(self):
         return [_Row(r, self._names) for r in self._cur.fetchall()]
@@ -505,18 +507,19 @@ def push_local_to_remote(local_path, log=print) -> dict:
                 conn.execute(f"DELETE FROM {table}")
         for table in TABLE_ORDER:
             local_cols = [r[1] for r in src.execute(f"PRAGMA table_info({table})")]
-            remote_cols = {r[1] for r in _connect().execute(f"PRAGMA table_info({table})").fetchall()}
-            cols = [c for c in local_cols if c in remote_cols]
+            remote_cols = {str(r[1]).lower() for r in _connect().execute(f"PRAGMA table_info({table})").fetchall()}
+            cols = [c for c in local_cols if c.lower() in remote_cols]
             if not cols:
                 continue
-            rows = src.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+            rows = src.execute(f"SELECT {', '.join(f'"{c}"' for c in cols)} FROM {table}").fetchall()
             per = max(1, 800 // len(cols))  # stay under SQLite's bound-parameter limit
             with tx() as conn:
                 for i in range(0, len(rows), per):
                     chunk = rows[i:i + per]
                     marks = ", ".join("(" + ", ".join("?" * len(cols)) + ")" for _ in chunk)
                     params = [v for r in chunk for v in tuple(r)]
-                    conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES {marks}", params)
+                    quoted = ", ".join(f'"{c}"' for c in cols)
+                    conn.execute(f"INSERT OR REPLACE INTO {table} ({quoted}) VALUES {marks}", params)
             counts[table] = len(rows)
             log(f"  {table}: {len(rows)} rows")
     finally:
