@@ -36,8 +36,9 @@ def logout():
     return auth.logout()
 
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def healthz():
+    # Uptime monitors (e.g. UptimeRobot) often use HEAD requests.
     return {"ok": True}
 
 STAGES = ["new", "qualified", "contacted", "replied", "meeting", "won", "lost", "skip"]
