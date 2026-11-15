@@ -496,7 +496,7 @@ table.table { width: 100%; border-collapse: separate; border-spacing: 0; }
 .cx-chev { display: inline-grid; width: 16px; height: 16px; transition: transform .15s; }
 .cx-chev svg { width: 14px; height: 14px; }
 .cx-think.open .cx-chev { transform: rotate(90deg); }
-.cx-think-body { margin: 6px 0 2px 2px; padding: 2px 0 2px 14px; border-left: 2px solid var(--border); color: var(--muted); font-size: 13.5px; line-height: 1.6; max-height: 320px; overflow: auto; }
+.cx-think-body { margin: 6px 0 2px 2px; padding: 2px 0 2px 14px; border-left: 2px solid var(--border); color: var(--muted); font-size: 13.5px; line-height: 1.6; }
 .cx-think-body p { margin: 0 0 .55em; }
 .cx-think-body strong { color: var(--text-2); font-weight: 600; }
 .cx-think-body ul { margin: 0 0 .55em; padding-left: 1.2em; }
@@ -589,3 +589,6 @@ html { transition: background-color .2s; }
 .phone-mark { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 5px; border-radius: 5px; vertical-align: -3px; color: var(--blue); background: var(--blue-bg); border: 1px solid var(--blue-bd); }
 .phone-mark.wa { color: var(--green); background: var(--green-bg); border-color: var(--green-bd); }
 .phone-mark svg { width: 11px; height: 11px; }
+
+/* Scrollbars that match the theme (no default grey arrows) */
+html, body, * { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }

@@ -27,7 +27,7 @@ You act through tools on the user's local database. Work like a sharp sales-ops 
 - Starting a sync or research job runs in the background; report the job and where to watch it (Pipeline page).
 - Never re-collect what the dashboard already has. Before start_sync, call stats: if the batches are already loaded, answer from the database instead of syncing (a sync only refreshes jobs, and skips companies refreshed in the last 2 days). Before research_companies, prefer search_companies with researched=false; already-researched companies are skipped automatically. Use force only when the user explicitly asks to refresh or redo.
 - Write like a sharp, friendly colleague. Lead with the answer. Use markdown: short paragraphs, **bold** for key names, bullet lists, and tables (company | why | contact) for results. Mention company names, never ids.
-- Never invent data. Everything about companies comes from tools. No emojis, no em dashes. Keep headings rare; prefer a short intro line, then the table or list, then one suggested next step.
+- Never invent data. Everything about companies comes from tools: only mention companies a tool returned in this conversation. Planning a search in your thoughts is not running it; call the tool, then answer. No emojis, no em dashes. Keep headings rare; prefer a short intro line, then the table or list, then one suggested next step.
 - Email confidence: verified (published), inferred (company's own format), likely (first@domain), guess.
 - Every company has a fit score (0-100) against the user's profile with reasons. When the user asks for the best targets, "companies that fit me", or doesn't specify an order, sort by fit and mention the reasons.
 - When drafting, pass the user's intent as `instructions` (e.g. which role to ask about, internship vs full-time vs contract).
@@ -355,6 +355,10 @@ def _draft_job(run, ids, mode, target, instructions):
 # Conversation loop (Gemini, streamed)
 # ---------------------------------------------------------------------------
 
+NUDGE = ("(System note: your last turn produced no visible answer and no tool call. Thinking is not doing. "
+         "Call the tools you need now to get real data, then write the answer for the user. "
+         "Only mention companies that a tool returned in this conversation.)")
+
 TOOL_LABELS = {
     "search_companies": "Searching companies",
     "get_company": "Reading company profile",
@@ -420,6 +424,7 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
     base = dict(system_instruction=system, tools=_declarations(),
                 thinking_config=T.ThinkingConfig(include_thoughts=True))
     try:
+        nudges = 0
         for step in range(MAX_STEPS + 1):
             final = step == MAX_STEPS
             cfg = T.GenerateContentConfig(**base, tool_config=T.ToolConfig(
@@ -452,6 +457,18 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
                 parts_out.append(T.Part(text=text_buf, thought_signature=text_sig))
             if parts_out:
                 history.append(T.Content(role="model", parts=parts_out))
+            if not calls and not text_buf.strip():
+                # The model thought but neither acted nor answered. Nudge it (max twice).
+                if nudges < 2 and not final:
+                    nudges += 1
+                    nudge = T.Part(text=NUDGE)
+                    if history and history[-1].role == "user":
+                        history[-1].parts.append(nudge)
+                    else:
+                        history.append(T.Content(role="user", parts=[nudge]))
+                    continue
+                yield {"type": "text", "text": "I couldn't put an answer together this time. Gemini may be busy; please send that again."}
+                break
             if not calls:
                 break
             responses = []
