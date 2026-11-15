@@ -521,16 +521,16 @@ async function exportFiltered(kind) {
   location.href = kind === "xlsx" ? `/api/export.xlsx?${idParam}` : `/api/export.csv?${idParam}`;
 }
 
-async function researchCompanies(ids) {
+async function researchCompanies(ids, force = false) {
   if (!state.status?.integrations.ai.ok) return toast("AI research needs GEMINI_API_KEY in your .env file.", "error");
   const ok = await confirmModal({
-    title: `Research ${plural(ids.length, "company", "companies")} with AI?`,
-    body: `<p>Gemini searches Google for funding rounds, published contact details, traction and news. Every email it reports is checked against the cited page before it's saved, and every fact keeps its source.</p><p class="muted">Uses about 2 Gemini requests per company. Free keys allow roughly 10 a minute, so large batches run at that pace.</p>`,
+    title: force ? "Refresh AI research for this company?" : `Research ${plural(ids.length, "company", "companies")} with AI?`,
+    body: `<p>Gemini searches Google for funding rounds, published contact details, traction and news. Every email it reports is checked against the cited page before it's saved, and every fact keeps its source.</p><p class="muted">${force ? "This company was researched before; this runs it again to pick up anything new." : "Companies already researched are skipped, so nothing is collected twice."} Uses about 2 Gemini requests per company. Free keys allow roughly 10 a minute.</p>`,
     confirm: "Start research",
   });
   if (!ok) return;
   await withLoading(null, async () => {
-    await api("/api/runs/research", { method: "POST", body: { ids } });
+    await api("/api/runs/research", { method: "POST", body: { ids, force } });
     toast("Research started. Track it on the Pipeline page.");
   });
 }
@@ -711,7 +711,7 @@ function paintCompany(c) {
   $("#d-stage").onchange = (e) => updateCompany(c.id, { stage: e.target.value }, "Stage updated");
   $("#d-priority").onclick = () => updateCompany(c.id, { priority: c.priority ? 0 : 1 }, c.priority ? "Priority removed" : "Marked as priority", true);
   $("#d-draft").onclick = () => draftModal([c.id]);
-  $("#d-research").onclick = () => researchCompanies([c.id]);
+  $("#d-research").onclick = () => researchCompanies([c.id], !!c.researched_at);
   $("#d-refresh").onclick = (e) => withLoading(e.currentTarget, async () => { paintCompany(await api(`/api/companies/${c.id}/refresh`, { method: "POST" })); toast("Company refreshed from YC and its website"); });
   let nt;
   $("#d-notes").oninput = (e) => { clearTimeout(nt); nt = setTimeout(() => api(`/api/companies/${c.id}`, { method: "PATCH", body: { notes: e.target.value } }).catch((er) => toast(er.message, "error")), 600); };

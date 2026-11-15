@@ -18,7 +18,8 @@ from .jobs import Run
 from .sources import yc
 
 CONFIDENCE_RANK = {"verified": 0, "inferred": 1, "likely": 2, "guess": 3}
-RESCRAPE_AFTER = timedelta(days=2)
+RESCRAPE_AFTER = timedelta(days=2)   # YC page: new jobs / founders show up often
+RECRAWL_AFTER = timedelta(days=14)   # company website: rarely changes, don't re-collect it
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,8 @@ def sync_batches(run: Run, batch_slugs: list[str], *, crawl: bool = True, resear
 
     stats = {"ok": 0, "failed": 0, "emails": 0, "jobs": 0}
     with ThreadPoolExecutor(max_workers=max(1, config.YC_CONCURRENCY)) as pool:
-        futures = {pool.submit(enrich_company, cid, crawl=crawl, run=run): cid for cid in todo}
+        futures = {pool.submit(enrich_company, cid, crawl=crawl and (force or _needs_crawl(cid)), run=run): cid
+                   for cid in todo}
         for fut in as_completed(futures):
             if run.cancelled:
                 for f in futures:
@@ -120,11 +122,36 @@ def research_many(run: Run, company_ids: list[int]) -> str:
     return summary
 
 
-def research_job(run: Run, company_ids: list[int]) -> str:
+def research_job(run: Run, company_ids: list[int], force: bool = False) -> str:
+    company_ids = list(dict.fromkeys(company_ids))
+    if not force:
+        done = {r["id"] for r in db.query(
+            f"SELECT id FROM companies WHERE researched_at IS NOT NULL AND id IN ({','.join('?' * len(company_ids))})",
+            company_ids)} if company_ids else set()
+        if done:
+            run.log(f"{len(done)} already researched, skipped (their data is in the dashboard). Use refresh to redo them.")
+        company_ids = [c for c in company_ids if c not in done]
+        if not company_ids:
+            run.log("Nothing new to research.")
+            return f"Nothing new to research ({len(done)} already researched)"
     summary = research_many(run, company_ids)
     fit.rescore(company_ids)
     _maybe_sync_sheet(run)
     return summary
+
+
+def _older_than(ts: str | None, age: timedelta) -> bool:
+    if not ts:
+        return True
+    try:
+        when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return datetime.now(timezone.utc) - when > age
+
+
+def _needs_crawl(cid: int) -> bool:
+    return _older_than(db.scalar("SELECT crawled_at FROM companies WHERE id=?", (cid,)), RECRAWL_AFTER)
 
 
 def _needs_scrape(cid: int) -> bool:

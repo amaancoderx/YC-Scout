@@ -124,7 +124,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 
 | | | |
 |---|---|---|
-| [Sourcing](#sourcing) (6) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (6) |
+| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (7) |
 | [Enrichment](#enrichment) (6) | [AI Research](#ai-research) (5) | [Automation](#automation) (5) |
 | [Email Intelligence](#email-intelligence) (6) | [Outreach](#outreach) (7) | [Exports](#exports) (4) |
 | [Dashboard](#dashboard) (6) | [Command Line](#command-line) (7) | [Project Structure](#project-structure) (9) |
@@ -137,6 +137,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Job board** - Every open role with salary, equity, experience, visa and remote location, refreshed on each sync.
 - **Incremental sync** - Re-running updates existing companies, adds new ones and closes filled jobs. Notes, stages and outreach stay untouched.
 - **No duplicates** - Every company, founder, email, job posting, phone number and news item is stored once. Repeated YC job listings and the same number with or without a country code are merged.
+- **No re-collecting** - Companies refreshed in the last 2 days are skipped, websites are re-crawled only after 14 days, and batches synced in the last 12 hours are never re-synced by the Agent. Force refresh overrides all of it.
 - **Batch picker** - Sync any mix of batches, including early admits for upcoming ones.
 
 </details>
@@ -183,7 +184,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Real sources** - Every grounded sentence keeps the URL it came from; anything without a working source is dropped.
 - **Email verification** - Emails are kept only if they literally appear on the cited page.
 - **Funding beyond YC** - Rounds, amounts, dates and lead investors, each with a source link. The YC batch itself is never counted as a round.
-- **Quota aware** - App-wide rate limiting and automatic model fallbacks keep free keys working.
+- **Quota aware** - App-wide rate limiting and automatic model fallbacks keep free keys working. Already-researched companies are skipped, so quota is never spent twice; refresh one from its panel when you want.
 
 </details>
 
@@ -209,6 +210,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Knows you** - Gets your profile and goal, so it ranks and writes for your situation.
 - **Send guard** - Sending always shows a Confirm and send button. The Agent never sends by itself.
 - **Multi-turn** - Remembers the conversation for follow-up questions; New chat starts fresh.
+- **Reuses what you have** - Checks the dashboard first and answers from it instead of syncing or researching data that is already there.
 
 </details>
 

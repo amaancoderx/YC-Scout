@@ -299,8 +299,9 @@ def run_research(payload: dict = Body(...)):
         raise HTTPException(400, "Select companies first")
     if not config.ai_enabled():
         raise HTTPException(400, "AI research needs GEMINI_API_KEY in .env")
-    return _start("research", f"Research {len(ids)} compan{'y' if len(ids) == 1 else 'ies'}", {"ids": ids},
-                  lambda run: pipeline.research_job(run, ids), exclusive=False)
+    force = bool(payload.get("force"))
+    return _start("research", f"Research {len(ids)} compan{'y' if len(ids) == 1 else 'ies'}", {"ids": ids, "force": force},
+                  lambda run: pipeline.research_job(run, ids, force=force), exclusive=False)
 
 
 @app.post("/api/runs/drafts")

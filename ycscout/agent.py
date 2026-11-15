@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from typing import Iterator
 
 from google.genai import types as T
@@ -25,6 +25,7 @@ You act through tools on the user's local database. Work like a sharp sales-ops 
 - Approve drafts only when the user explicitly asks you to approve or send them.
 - To send, call request_send. It does not send: it asks the user to confirm in the UI. Never claim emails were sent.
 - Starting a sync or research job runs in the background; report the job and where to watch it (Pipeline page).
+- Never re-collect what the dashboard already has. Before start_sync, call stats: if the batches are already loaded, answer from the database instead of syncing (a sync only refreshes jobs, and skips companies refreshed in the last 2 days). Before research_companies, prefer search_companies with researched=false; already-researched companies are skipped automatically. Use force only when the user explicitly asks to refresh or redo.
 - Write like a sharp, friendly colleague. Lead with the answer. Use markdown: short paragraphs, **bold** for key names, bullet lists, and tables (company | why | contact) for results. Mention company names, never ids.
 - Never invent data. Everything about companies comes from tools. No emojis, no em dashes. Keep headings rare; prefer a short intro line, then the table or list, then one suggested next step.
 - Email confidence: verified (published), inferred (company's own format), likely (first@domain), guess.
@@ -49,6 +50,7 @@ TOOLS = [
                 "hiring_only": {"type": "boolean"},
                 "remote_jobs_only": {"type": "boolean", "description": "Only companies with at least one open remote role."},
                 "has_phone": {"type": "boolean", "description": "Only companies that publish a phone or WhatsApp number."},
+                "researched": {"type": "boolean", "description": "true = only AI-researched companies, false = only not yet researched."},
                 "stage": {"type": "string", "enum": ["new", "qualified", "contacted", "replied", "meeting", "won", "lost", "skip"]},
                 "min_email_confidence": {"type": "string", "enum": ["verified", "inferred", "likely", "guess"]},
                 "max_team_size": {"type": "integer"},
@@ -119,14 +121,17 @@ TOOLS = [
             "properties": {
                 "batches": {"type": "array", "items": {"type": "string"}, "description": "Batch slugs, e.g. ['fall-2026']. Empty = 2 most recent."},
                 "research": {"type": "boolean", "description": "Also run AI deep research (funding, verified emails). Costs API credits."},
-                "force": {"type": "boolean"},
+                "force": {"type": "boolean", "description": "Re-sync even if the batches were synced recently. Only when the user explicitly asks to refresh."},
             },
         },
     },
     {
         "name": "research_companies",
         "description": "Run AI deep web research on specific companies (funding rounds, published emails, highlights). Background job.",
-        "input_schema": {"type": "object", "properties": {"company_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["company_ids"]},
+        "input_schema": {"type": "object", "properties": {
+            "company_ids": {"type": "array", "items": {"type": "integer"}},
+            "force": {"type": "boolean", "description": "Re-research companies already researched. Only when the user explicitly asks to refresh."}},
+            "required": ["company_ids"]},
     },
     {
         "name": "stats",
@@ -168,6 +173,10 @@ def search_companies(args: dict) -> list[dict]:
         where.append("(c.is_hiring=1 OR EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1))")
     if args.get("remote_jobs_only"):
         where.append("EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1 AND lower(COALESCE(j.location,'')) LIKE '%remote%')")
+    if args.get("researched") is True:
+        where.append("c.researched_at IS NOT NULL")
+    elif args.get("researched") is False:
+        where.append("c.researched_at IS NULL")
     if args.get("has_phone"):
         where.append("(COALESCE(c.phones,'[]') NOT IN ('','[]') OR COALESCE(c.whatsapp,'[]') NOT IN ('','[]'))")
     if args.get("stage"):
@@ -191,7 +200,7 @@ def search_companies(args: dict) -> list[dict]:
     limit = max(1, min(int(args.get("limit") or 25), 200))
     rows = db.query(
         f"""SELECT c.id, c.name, c.batch, c.one_liner, c.industry, c.team_size, c.stage, c.funding_total,
-               c.fit_score, c.fit_reasons, c.phones, c.whatsapp,
+               c.fit_score, c.fit_reasons, c.phones, c.whatsapp, c.researched_at, c.scraped_at AS last_synced,
                (SELECT COUNT(*) FROM jobs j WHERE j.company_id=c.id AND j.active=1) AS open_roles,
                (SELECT GROUP_CONCAT(j.title || ' [' || COALESCE(j.location,'') || ']', '; ') FROM jobs j WHERE j.company_id=c.id AND j.active=1) AS roles,
                (SELECT ct.email || ' (' || ct.confidence || ')' FROM contacts ct WHERE ct.company_id=c.id AND ct.is_primary=1
@@ -223,16 +232,23 @@ def company_detail(cid: int) -> dict | None:
 
 
 def stats() -> dict:
-    loaded = {r["batch_slug"]: r["n"] for r in db.query("SELECT batch_slug, COUNT(*) n FROM companies GROUP BY batch_slug")}
+    rows = db.query("SELECT batch_slug, COUNT(*) n, MAX(scraped_at) last_synced, "
+                    "SUM(researched_at IS NOT NULL) researched FROM companies GROUP BY batch_slug")
+    loaded = {r["batch_slug"]: r for r in rows}
+    def info(slug):
+        r = loaded.get(slug) or {}
+        return {"loaded": r.get("n", 0), "last_synced": r.get("last_synced"), "researched": r.get("researched", 0)}
     try:
-        available = [{"slug": b.slug, "name": b.name, "companies": b.count, "loaded": loaded.get(b.slug, 0)} for b in yc.list_batches()[:8]]
+        available = [{"slug": b.slug, "name": b.name, "companies": b.count, **info(b.slug)} for b in yc.list_batches()[:8]]
     except Exception:
-        available = [{"slug": k, "loaded": v} for k, v in loaded.items()]
+        available = [{"slug": k, **info(k)} for k in loaded]
     return {
         "companies": db.scalar("SELECT COUNT(*) FROM companies"),
         "founders": db.scalar("SELECT COUNT(*) FROM founders WHERE is_active=1"),
         "emails_by_confidence": {r["confidence"]: r["n"] for r in db.query("SELECT confidence, COUNT(*) n FROM contacts GROUP BY confidence")},
         "open_roles": db.scalar("SELECT COUNT(*) FROM jobs WHERE active=1"),
+        "researched": db.scalar("SELECT COUNT(*) FROM companies WHERE researched_at IS NOT NULL"),
+        "not_researched": db.scalar("SELECT COUNT(*) FROM companies WHERE researched_at IS NULL"),
         "stages": {r["stage"]: r["n"] for r in db.query("SELECT stage, COUNT(*) n FROM companies GROUP BY stage")},
         "outreach": {r["status"]: r["n"] for r in db.query("SELECT status, COUNT(*) n FROM outreach GROUP BY status")},
         "batches": available,
@@ -295,16 +311,36 @@ def _run_tool(name: str, args: dict, ctx: dict) -> object:
         slugs = args.get("batches") or [b.slug for b in yc.recent_batches(2)]
         slugs = [s.lower().replace(" ", "-") for s in slugs]
         research = bool(args.get("research"))
+        if not args.get("force") and not research:
+            # Don't re-collect: batches synced in the last 12 hours are already in the dashboard.
+            fresh = []
+            for s in slugs:
+                last = db.scalar("SELECT MIN(scraped_at) FROM companies WHERE batch_slug=?", (s,))
+                if last and not pipeline._older_than(last, timedelta(hours=12)):
+                    fresh.append({"batch": s, "companies": db.scalar("SELECT COUNT(*) FROM companies WHERE batch_slug=?", (s,)),
+                                  "last_synced": last})
+            if len(fresh) == len(slugs):
+                return {"status": "skipped", "reason": "Already up to date: these batches were synced in the last 12 hours, "
+                        "so their companies, founders, jobs and emails are already in the dashboard. Answer from the database. "
+                        "Only pass force=true if the user explicitly asks to refresh anyway.", "batches": fresh}
         run_id = jobs.start("sync", f"Sync {', '.join(slugs)}", {"batches": slugs, "research": research},
                             lambda run: pipeline.sync_batches(run, slugs, research=research, force=bool(args.get("force"))))
         ctx["runs"].append(run_id)
         return {"job_id": run_id, "status": "started", "batches": slugs}
     if name == "research_companies":
         ids = [int(i) for i in args.get("company_ids") or []]
-        run_id = jobs.start("research", f"Research {len(ids)} companies", {"ids": ids},
-                            lambda run: pipeline.research_job(run, ids), exclusive=False)
+        force = bool(args.get("force"))
+        already = {r["id"] for r in db.query(
+            f"SELECT id FROM companies WHERE researched_at IS NOT NULL AND id IN ({','.join('?' * len(ids))})", ids)} if ids else set()
+        todo = ids if force else [i for i in ids if i not in already]
+        if not todo:
+            return {"status": "skipped", "reason": "All of these companies are already researched; their data is in the dashboard.",
+                    "already_researched": len(already)}
+        run_id = jobs.start("research", f"Research {len(todo)} companies", {"ids": todo, "force": force},
+                            lambda run: pipeline.research_job(run, todo, force=force), exclusive=False)
         ctx["runs"].append(run_id)
-        return {"job_id": run_id, "status": "started"}
+        return {"job_id": run_id, "status": "started", "researching": len(todo),
+                "skipped_already_researched": 0 if force else len(already)}
     if name == "stats":
         return stats()
     return {"error": f"unknown tool {name}"}
@@ -355,6 +391,10 @@ def _tool_summary(name: str, out: object) -> str:
         return f"{out.get('approved', 0)} approved"
     if name == "request_send" and isinstance(out, dict):
         return f"{out.get('approved_in_queue', 0)} ready to send"
+    if isinstance(out, dict) and out.get("status") == "skipped":
+        return "already up to date" if name == "start_sync" else "already researched"
+    if name == "research_companies" and isinstance(out, dict) and out.get("skipped_already_researched"):
+        return f"job started, {out['skipped_already_researched']} already researched skipped"
     if name in ("draft_emails", "start_sync", "research_companies") and isinstance(out, dict):
         return "job started"
     return "done"

@@ -68,6 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     sy.add_argument("--no-crawl", action="store_true")
     r = sub.add_parser("research")
     r.add_argument("target")
+    r.add_argument("--force", action="store_true", help="re-research companies that were already researched")
     sub.add_parser("export")
     sub.add_parser("sheet")
     sub.add_parser("replies")
@@ -104,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         sql = "SELECT id FROM companies" + ("" if args.target == "all" else " WHERE batch_slug=?")
         ids = [r["id"] for r in db.query(sql, () if args.target == "all" else (args.target,))]
-        _run_blocking("research", f"Research {len(ids)} companies", lambda run: pipeline.research_job(run, ids))
+        _run_blocking("research", f"Research {len(ids)} companies", lambda run: pipeline.research_job(run, ids, force=args.force))
         return 0
 
     if args.cmd == "export":
