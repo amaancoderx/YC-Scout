@@ -53,11 +53,20 @@ def client() -> genai.Client:
 
 
 # Models whose daily free quota is used up -> unix time when Google resets it.
-_exhausted: dict[str, float] = {}
+# Kept in data/model_quota.json so a restart doesn't waste a request rediscovering it.
+_QUOTA_FILE = config.DATA_DIR / "model_quota.json"
+try:
+    _exhausted: dict[str, float] = {k: float(v) for k, v in json.loads(_QUOTA_FILE.read_text()).items() if float(v) > time.time()}
+except Exception:
+    _exhausted = {}
 
 
 def _mark_exhausted(model: str, exc: Exception) -> None:
     _exhausted[model] = time.time() + min(_retry_delay(exc) or 3600, 86400)
+    try:
+        _QUOTA_FILE.write_text(json.dumps(_exhausted))
+    except OSError:
+        pass
 
 
 def models(first: str | None = None) -> list[str]:
