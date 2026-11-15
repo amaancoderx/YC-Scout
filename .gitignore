@@ -1,0 +1,21 @@
+# Secrets: never commit
+.env
+google-key.json
+*.json.json
+*service-account*.json
+
+# Your data: database, exports, scraped contacts
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
