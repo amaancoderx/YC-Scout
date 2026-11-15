@@ -7,6 +7,7 @@ it returns a confirmation request the user clicks in the UI.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import uuid
@@ -15,7 +16,7 @@ from typing import Iterator
 
 from google.genai import types as T
 
-from . import ai, config, db, jobs, outreach, pipeline
+from . import ai, config, db, export, fit, jobs, outreach, pipeline
 from .sources import yc
 
 SYSTEM = """You are the operator of YC Scout, a tool that sources recently funded Y Combinator startups, finds their founders' contact details and runs email outreach. Today is {today}.
@@ -26,7 +27,13 @@ You act through tools on the user's local database. Work like a sharp sales-ops 
 - Use search_companies to find targets; combine filters rather than guessing ids.
 - When the user asks for outreach, draft first (draft_emails), then summarize what was drafted. Drafts can be reviewed on the Outreach page.
 - Approve drafts only when the user explicitly asks you to approve or send them.
-- To send, call request_send. It does not send: it asks the user to confirm in the UI. Never claim emails were sent.
+- Sending: call request_send, then tell the user how many approved emails are ready and ask them to reply "send" (or click Confirm and send).
+  Only when their NEXT message clearly confirms, call confirm_send. Never call confirm_send in the same turn as request_send,
+  never treat earlier or vague messages as confirmation, and never claim emails were sent unless confirm_send started a job.
+- You can operate the entire product by prompt: sync, refresh, research, draft, edit, approve, unapprove, delete, retry, send (with confirmation),
+  check replies, create follow-ups, mark replied, export Excel/CSV (give the download link), push to Google Sheets, change settings and templates,
+  manage the do-not-contact list, cancel jobs, test connections, and manage memory. When a request needs several steps, do them in order and report each.
+- Changes that delete or cancel things, or edit settings, only when the user asked for them; for bulk deletes, say exactly what you will remove.
 - Starting a sync or research job runs in the background; report the job and where to watch it (Pipeline page).
 - Never re-collect what the dashboard already has. Before start_sync, call stats: if the batches are already loaded, answer from the database instead of syncing (a sync only refreshes jobs, and skips companies refreshed in the last 2 days). Before research_companies, prefer search_companies with researched=false; already-researched companies are skipped automatically. Use force only when the user explicitly asks to refresh or redo.
 - Write like a sharp, friendly colleague. Lead with the answer. Use markdown: short paragraphs, **bold** for key names, bullet lists, and tables (company | why | contact) for results. Mention company names, never ids.
@@ -471,10 +478,232 @@ def _extra_tool(name: str, args: dict, ctx: dict):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Operate everything by prompt: the remaining dashboard actions as tools
+# ---------------------------------------------------------------------------
+_pending_send: dict[str, float] = {}   # chat_id -> when request_send asked the user
+SEND_CONFIRM_WINDOW = 30 * 60
+
+SETTING_FIELDS = {
+    "daily_send_limit": {"type": "integer"}, "send_delay_seconds": {"type": "integer"},
+    "followup_after_days": {"type": "integer"}, "max_followups": {"type": "integer"},
+    "auto_followups": {"type": "boolean"}, "auto_sync_enabled": {"type": "boolean"}, "auto_sync_hours": {"type": "integer"},
+    "auto_sync_batches": {"type": "array", "items": {"type": "string"}}, "auto_research_new": {"type": "boolean"},
+    "auto_sheet_sync": {"type": "boolean"}, "sender_profile": {"type": "string"}, "outreach_goal": {"type": "string"},
+    "email_tone": {"type": "string"}, "template_subject": {"type": "string"}, "template_body": {"type": "string"},
+    "followup_subject": {"type": "string"}, "followup_body": {"type": "string"}, "signature_footer": {"type": "string"},
+    "physical_address": {"type": "string"}, "fit_strengths": {"type": "string"}, "default_proof_line": {"type": "string"},
+}
+SETTING_LIMITS = {"daily_send_limit": (1, 500), "send_delay_seconds": (5, 3600), "followup_after_days": (1, 60),
+                  "max_followups": (0, 5), "auto_sync_hours": (1, 720)}
+
+OPS_TOOLS = [
+    {"name": "refresh_companies", "description": "Re-collect YC page, website and emails for specific companies now (background job). Use when the user asks to refresh/update a company.",
+     "input_schema": {"type": "object", "properties": {"company_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["company_ids"]}},
+    {"name": "add_contact", "description": "Add an email the user knows for a company (saved as verified). Optionally attach it to a founder by name.",
+     "input_schema": {"type": "object", "properties": {"company_id": {"type": "integer"}, "email": {"type": "string"}, "founder_name": {"type": "string"}}, "required": ["company_id", "email"]}},
+    {"name": "remove_contact", "description": "Remove a wrong email address from a company.",
+     "input_schema": {"type": "object", "properties": {"company_id": {"type": "integer"}, "email": {"type": "string"}}, "required": ["company_id", "email"]}},
+    {"name": "export_data", "description": "Create a download link for Excel (all 5 tables) or CSV (one table), optionally only for some companies. Give the user the link as markdown.",
+     "input_schema": {"type": "object", "properties": {"format": {"type": "string", "enum": ["xlsx", "csv"]},
+                      "table": {"type": "string", "enum": ["Companies", "Founders", "Emails", "Jobs", "Outreach"]},
+                      "company_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["format"]}},
+    {"name": "sync_google_sheet", "description": "Push all data to the connected Google Sheet now and return its link.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "manage_emails", "description": "Bulk actions on outreach emails: unapprove (back to draft), delete (unsent only), retry (failed ones), mark_replied (the person replied outside the inbox check).",
+     "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["unapprove", "delete", "retry", "mark_replied"]},
+                      "outreach_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["action", "outreach_ids"]}},
+    {"name": "check_replies", "description": "Scan the inbox now for replies and bounces (background job).", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "create_followups", "description": "Create follow-up drafts now for sent emails that got no reply after the configured days.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "confirm_send", "description": "Send all approved emails. Only call this when, in their latest message, the user explicitly confirmed sending AFTER you called request_send in an earlier turn of this chat.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "cancel_job", "description": "Stop a running pipeline job by id.", "input_schema": {"type": "object", "properties": {"run_id": {"type": "integer"}}, "required": ["run_id"]}},
+    {"name": "update_settings", "description": "Change settings: sending limits, delays, follow-up rules, automation (auto-sync, auto follow-ups, auto research, sheet sync), profile, goal, tone, email templates, footer, mailing address, fit strengths. Only the fields given change.",
+     "input_schema": {"type": "object", "properties": {"settings": {"type": "object", "properties": SETTING_FIELDS}}, "required": ["settings"]}},
+    {"name": "do_not_contact", "description": "Manage the do-not-contact list: add an email (also cancels its pending emails), remove one, or list them.",
+     "input_schema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["add", "remove", "list"]}, "email": {"type": "string"}}, "required": ["action"]}},
+    {"name": "test_connection", "description": "Test an integration: ai (Gemini), smtp (Gmail sending) or sheets (Google Sheets).",
+     "input_schema": {"type": "object", "properties": {"what": {"type": "string", "enum": ["ai", "smtp", "sheets"]}}, "required": ["what"]}},
+]
+TOOLS.extend(OPS_TOOLS)
+
+OPS_LABELS = {
+    "refresh_companies": "Refreshing company data", "add_contact": "Adding email", "remove_contact": "Removing email",
+    "export_data": "Preparing export", "sync_google_sheet": "Syncing Google Sheet", "manage_emails": "Updating emails",
+    "check_replies": "Checking inbox", "create_followups": "Creating follow-ups", "confirm_send": "Sending emails",
+    "cancel_job": "Stopping job", "update_settings": "Updating settings", "do_not_contact": "Do-not-contact list",
+    "test_connection": "Testing connection",
+}
+
+
+def _start_job(ctx: dict, kind: str, label: str, params: dict, fn, exclusive: bool = False) -> dict:
+    try:
+        run_id = jobs.start(kind, label, params, fn, exclusive=exclusive)
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    ctx["runs"].append(run_id)
+    return {"job_id": run_id, "status": "started"}
+
+
+def _refresh_job(run, ids: list[int]) -> str:
+    run.set_total(len(ids))
+    ok = 0
+    for cid in ids:
+        run.check()
+        try:
+            pipeline.enrich_company(cid, crawl=True, run=run)
+            ok += 1
+        except Exception as exc:
+            run.log(f"  ! {cid}: {exc}")
+        run.advance()
+    pipeline.dedupe_all()
+    fit.rescore(ids)
+    return f"Refreshed {ok} of {len(ids)} companies"
+
+
+def _ops_tool(name: str, args: dict, ctx: dict):
+    if name == "refresh_companies":
+        ids = list(dict.fromkeys(int(i) for i in args.get("company_ids") or []))
+        if not ids:
+            return {"error": "no companies given"}
+        return _start_job(ctx, "refresh", f"Refresh {len(ids)} compan{'y' if len(ids) == 1 else 'ies'}", {"ids": ids},
+                          lambda run: _refresh_job(run, ids))
+    if name == "add_contact":
+        email = (args.get("email") or "").strip().lower()
+        cid = int(args.get("company_id") or 0)
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[a-z]{2,}", email) or not db.scalar("SELECT 1 FROM companies WHERE id=?", (cid,)):
+            return {"error": "need a valid email and company"}
+        fid = None
+        if args.get("founder_name"):
+            fid = db.scalar("SELECT id FROM founders WHERE company_id=? AND lower(name) LIKE ?",
+                            (cid, f"%{args['founder_name'].strip().lower()}%"))
+        db.execute("""INSERT INTO contacts(company_id, founder_id, email, kind, confidence, source, created_at)
+                      VALUES (?,?,?,?, 'verified', 'manual', ?)
+                      ON CONFLICT(company_id, email) DO UPDATE SET confidence='verified', source='manual',
+                          founder_id=COALESCE(excluded.founder_id, contacts.founder_id)""",
+                   (cid, fid, email, "founder" if fid else "company", db.now()))
+        pipeline.rebuild_contacts(cid)
+        ctx["changed"] = True
+        return {"added": email, "linked_to_founder": bool(fid)}
+    if name == "remove_contact":
+        cid = int(args.get("company_id") or 0)
+        email = (args.get("email") or "").strip().lower()
+        found = db.scalar("SELECT COUNT(*) FROM contacts WHERE company_id=? AND email=?", (cid, email))
+        db.execute("DELETE FROM contacts WHERE company_id=? AND email=?", (cid, email))
+        if found:
+            pipeline.rebuild_contacts(cid)
+            ctx["changed"] = True
+        return {"removed": bool(found)}
+    if name == "export_data":
+        ids = ",".join(str(int(i)) for i in args.get("company_ids") or [])
+        if args.get("format") == "csv":
+            url = f"/api/export.csv?table={args.get('table') or 'Companies'}" + (f"&ids={ids}" if ids else "")
+        else:
+            url = "/api/export.xlsx" + (f"?ids={ids}" if ids else "")
+        return {"download_url": url, "note": "Give the user this as a markdown link, e.g. [Download Excel](" + url + ")."}
+    if name == "sync_google_sheet":
+        if not config.sheets_enabled():
+            return {"error": "Google Sheets is not connected (GOOGLE_SERVICE_ACCOUNT_FILE / GOOGLE_SHEET_ID in .env)"}
+        return {"sheet_url": export.sync_google_sheet()}
+    if name == "manage_emails":
+        ids = [int(i) for i in args.get("outreach_ids") or []]
+        if not ids:
+            return {"error": "no emails given"}
+        ph = ",".join("?" * len(ids))
+        action = args.get("action")
+        before = db.scalar(f"SELECT COUNT(*) FROM outreach WHERE id IN ({ph})", ids) or 0
+        if action == "unapprove":
+            db.execute(f"UPDATE outreach SET status='draft', approved_at=NULL WHERE id IN ({ph}) AND status='approved'", ids)
+        elif action == "delete":
+            db.execute(f"DELETE FROM outreach WHERE id IN ({ph}) AND status IN ('draft','approved','cancelled','failed')", ids)
+        elif action == "retry":
+            db.execute(f"UPDATE outreach SET status='approved', error=NULL, approved_at=? WHERE id IN ({ph}) AND status='failed'", (db.now(), *ids))
+        elif action == "mark_replied":
+            for row in db.query(f"SELECT * FROM outreach WHERE id IN ({ph})", ids):
+                db.execute("UPDATE outreach SET status='replied', replied_at=? WHERE to_email=? AND status='sent'", (db.now(), row["to_email"]))
+                db.execute("UPDATE outreach SET status='cancelled', error='recipient replied' WHERE to_email=? AND status IN ('draft','approved')", (row["to_email"],))
+                db.execute("UPDATE companies SET stage='replied' WHERE id=? AND stage IN ('new','qualified','contacted')", (row["company_id"],))
+        else:
+            return {"error": "unknown action"}
+        ctx["changed"] = True
+        return {"action": action, "emails": before}
+    if name == "check_replies":
+        if not config.imap_enabled():
+            return {"error": "Reply tracking needs SMTP_USER and SMTP_PASSWORD in .env"}
+        return _start_job(ctx, "replies", "Check replies", {}, lambda run: outreach.check_replies(run))
+    if name == "create_followups":
+        n = outreach.schedule_followups()
+        ctx["changed"] = True
+        return {"followup_drafts_created": n}
+    if name == "confirm_send":
+        chat_id = ctx.get("chat_id")
+        asked = _pending_send.get(chat_id or "")
+        if not asked or asked >= ctx.get("turn_started", 0) or time.time() - asked > SEND_CONFIRM_WINDOW:
+            return {"error": "Not confirmed. Call request_send first, tell the user how many emails are ready, and wait for them to confirm in their next message."}
+        if not config.smtp_enabled():
+            return {"error": "Email sending needs SMTP_USER and SMTP_PASSWORD in .env"}
+        n = db.scalar("SELECT COUNT(*) FROM outreach WHERE status='approved'") or 0
+        if not n:
+            return {"error": "No approved emails to send."}
+        _pending_send.pop(chat_id, None)
+        res = _start_job(ctx, "send", "Send approved emails", {}, lambda run: outreach.send_approved(run), exclusive=True)
+        res["sending"] = n
+        return res
+    if name == "cancel_job":
+        return {"cancelled": jobs.cancel(int(args.get("run_id") or 0))}
+    if name == "update_settings":
+        raw = args.get("settings") or {}
+        clean = {}
+        for k, v in raw.items():
+            if k not in SETTING_FIELDS:
+                continue
+            if k in SETTING_LIMITS:
+                lo, hi = SETTING_LIMITS[k]
+                try:
+                    v = max(lo, min(hi, int(v)))
+                except (TypeError, ValueError):
+                    return {"error": f"{k} must be a number"}
+            clean[k] = v
+        if not clean:
+            return {"error": "no valid settings given"}
+        db.set_settings(clean)
+        if "fit_strengths" in clean or "default_proof_line" in clean:
+            fit.rescore()
+        ctx["changed"] = True
+        return {"updated": clean}
+    if name == "do_not_contact":
+        action = args.get("action")
+        email = (args.get("email") or "").strip().lower()
+        if action == "list":
+            return db.query("SELECT email, reason, created_at FROM suppression ORDER BY created_at DESC LIMIT 200")
+        if "@" not in email:
+            return {"error": "give an email"}
+        if action == "add":
+            db.suppress(email, "manual")
+            db.execute("UPDATE outreach SET status='cancelled', error='do not contact' WHERE to_email=? AND status IN ('draft','approved')", (email,))
+        elif action == "remove":
+            db.execute("DELETE FROM suppression WHERE email=?", (email,))
+        ctx["changed"] = True
+        return {"action": action, "email": email}
+    if name == "test_connection":
+        what = args.get("what")
+        if what == "ai":
+            return {"ok": True, "detail": ai.ping()}
+        if what == "smtp":
+            return {"ok": True, "detail": outreach.test_smtp()}
+        if what == "sheets":
+            return {"ok": True, "detail": export.sync_google_sheet()}
+        return {"error": "unknown connection"}
+    return None
+
+
 def _run_tool(name: str, args: dict, ctx: dict) -> object:
     extra = _extra_tool(name, args, ctx)
     if extra is not None:
         return extra
+    ops = _ops_tool(name, args, ctx)
+    if ops is not None:
+        return ops
     if name == "search_companies":
         return search_companies(args)
     if name == "get_company":
@@ -524,6 +753,8 @@ def _run_tool(name: str, args: dict, ctx: dict) -> object:
     if name == "request_send":
         n = db.scalar("SELECT COUNT(*) FROM outreach WHERE status='approved'") or 0
         ctx["confirm"] = {"action": "send", "count": n}
+        if n and ctx.get("chat_id"):
+            _pending_send[ctx["chat_id"]] = time.time()
         return {"pending_user_confirmation": True, "approved_in_queue": n,
                 "daily_limit": db.get_setting("daily_send_limit"), "sent_today": outreach.sent_today()}
     if name == "start_sync":
@@ -655,6 +886,31 @@ def _tool_summary(name: str, out: object) -> str:
         return "draft updated"
     if name == "cancel_drafts" and isinstance(out, dict):
         return f"{out.get('cancelled', 0)} cancelled"
+    if isinstance(out, dict) and out.get("error") is None:
+        if name == "confirm_send" and out.get("sending"):
+            return f"sending {out['sending']}"
+        if name == "update_settings" and out.get("updated"):
+            return ", ".join(f"{k.replace('_', ' ')} = {v}" for k, v in out["updated"].items())[:80]
+        if name == "export_data":
+            return "download link ready"
+        if name == "sync_google_sheet":
+            return "sheet updated"
+        if name == "do_not_contact" and out.get("action") in ("add", "remove"):
+            return f"{'added' if out['action'] == 'add' else 'removed'} {out.get('email')}"
+        if name == "add_contact":
+            return f"added {out.get('added')}"
+        if name == "remove_contact":
+            return "removed" if out.get("removed") else "not found"
+        if name == "manage_emails":
+            return f"{out.get('action')} {out.get('emails')}"
+        if name == "create_followups":
+            return f"{out.get('followup_drafts_created', 0)} follow-ups"
+        if name == "cancel_job":
+            return "stopped" if out.get("cancelled") else "not running"
+        if name == "test_connection":
+            return str(out.get("detail", "ok"))[:60]
+    if name == "do_not_contact" and isinstance(out, list):
+        return f"{len(out)} on the list"
     if name == "remember" and isinstance(out, dict):
         return "already remembered" if out.get("duplicate") else "saved"
     if name == "forget" and isinstance(out, dict):
@@ -817,7 +1073,8 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
         if blocks and blocks[-1]["kind"] == "thinking" and not blocks[-1].get("t1"):
             blocks[-1]["t1"] = now_ms()
 
-    ctx: dict = {"runs": [], "confirm": None, "changed": False, "memory_changed": False, "chat_id": chat_id}
+    ctx: dict = {"runs": [], "confirm": None, "changed": False, "memory_changed": False, "chat_id": chat_id,
+                 "turn_started": time.time()}
     for ev in _run_turn(history, message, ctx):
         t = ev["type"]
         if t == "thinking":
@@ -926,7 +1183,7 @@ def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dic
                 args = _plain(dict(fc.args or {}))
                 call_id = fc.id or f"{step}-{i}"
                 yield {"type": "tool_start", "id": call_id, "name": name,
-                       "label": TOOL_LABELS.get(name, name), "input": args}
+                       "label": TOOL_LABELS.get(name) or OPS_LABELS.get(name, name), "input": args}
                 try:
                     out = _run_tool(name, args, ctx)
                     ok = not (isinstance(out, dict) and out.get("error"))
