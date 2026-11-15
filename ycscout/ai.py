@@ -52,17 +52,32 @@ def client() -> genai.Client:
         return _client
 
 
+# Models whose daily free quota is used up -> unix time when Google resets it.
+_exhausted: dict[str, float] = {}
+
+
+def _mark_exhausted(model: str, exc: Exception) -> None:
+    _exhausted[model] = time.time() + min(_retry_delay(exc) or 3600, 86400)
+
+
 def models(first: str | None = None) -> list[str]:
     out = []
     for m in [first, config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS]:
         if m and m not in out:
             out.append(m)
-    return out
+    now = time.time()
+    ready = [m for m in out if _exhausted.get(m, 0) <= now]
+    return ready or out  # if everything is exhausted, still try (quota may have reset)
+
+
+def active_model() -> str:
+    """The model the agent will use right now (skips models out of daily quota)."""
+    return models()[0]
 
 
 def model_label(model: str | None = None) -> str:
     """'gemini-3.5-flash' -> 'Gemini 3.5 Flash'."""
-    m = (model or config.GEMINI_MODEL).replace("models/", "")
+    m = (model or active_model()).replace("models/", "")
     return " ".join(p.capitalize() if not re.match(r"\d", p) else p for p in m.split("-"))
 
 
@@ -134,6 +149,8 @@ def generate(contents, cfg: T.GenerateContentConfig, *, attempts_per_model: int 
                 last = exc
                 if not _retryable(exc):
                     raise _friendly(exc) from exc
+                if _no_quota(exc):
+                    _mark_exhausted(model, exc)
                 if getattr(exc, "code", None) == 404 or _no_quota(exc):
                     break  # model (or this tool) not available to this key: next model
                 if attempt + 1 < attempts_per_model:
@@ -277,6 +294,8 @@ def stream(contents: list, cfg: T.GenerateContentConfig) -> Iterator[tuple[str, 
                 last = exc
                 if not _retryable(exc):
                     raise _friendly(exc) from exc
+                if _no_quota(exc):
+                    _mark_exhausted(model, exc)
                 if getattr(exc, "code", None) == 404 or _no_quota(exc):
                     break
                 if attempt == 0:

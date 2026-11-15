@@ -124,7 +124,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 
 | | | |
 |---|---|---|
-| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (7) |
+| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (8) |
 | [Enrichment](#enrichment) (6) | [AI Research](#ai-research) (5) | [Automation](#automation) (5) |
 | [Email Intelligence](#email-intelligence) (6) | [Outreach](#outreach) (7) | [Exports](#exports) (4) |
 | [Dashboard](#dashboard) (6) | [Command Line](#command-line) (7) | [Project Structure](#project-structure) (9) |
@@ -184,7 +184,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Real sources** - Every grounded sentence keeps the URL it came from; anything without a working source is dropped.
 - **Email verification** - Emails are kept only if they literally appear on the cited page.
 - **Funding beyond YC** - Rounds, amounts, dates and lead investors, each with a source link. The YC batch itself is never counted as a round.
-- **Quota aware** - App-wide rate limiting and automatic model fallbacks keep free keys working. Already-researched companies are skipped, so quota is never spent twice; refresh one from its panel when you want.
+- **Quota aware** - App-wide rate limiting and automatic model fallbacks keep free keys working. When a model's daily free quota runs out, it is skipped until Google resets it. Already-researched companies are skipped, so quota is never spent twice; refresh one from its panel when you want.
 
 </details>
 
@@ -209,7 +209,8 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Live thinking** - Streams Gemini's thought summaries, each tool step and the answer as it is written.
 - **Knows you** - Gets your profile and goal, so it ranks and writes for your situation.
 - **Send guard** - Sending always shows a Confirm and send button. The Agent never sends by itself.
-- **Multi-turn** - Remembers the conversation for follow-up questions; New chat starts fresh.
+- **Saved chats** - Every conversation is saved locally. Reopen and continue any chat, search, rename or delete one, or delete all.
+- **Memory** - Learns lasting facts and preferences across chats ("only remote roles open to India"). View, add or delete memories, turn memory off, or clear it all.
 - **Reuses what you have** - Checks the dashboard first and answers from it instead of syncing or researching data that is already there.
 
 </details>

@@ -11,6 +11,8 @@ const fmt = (n) => (n ?? 0).toLocaleString();
 const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many || one + "s"}`;
 
 const ICONS = {
+  edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  memory: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
   moon: '<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
   monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>',
@@ -198,7 +200,7 @@ const state = {
   status: null,
   companies: { q: "", batch: "", industry: "", stage: "", hiring: false, remote: false, phone: false, email: "", researched: false, sort: "fit", dir: "desc", page: 1, selected: new Set(), data: null },
   outreach: { tab: "draft", activeId: null, selected: new Set(), data: null },
-  agent: { session: null, messages: [] },
+  agent: { session: null, messages: [], chats: [] },
   runPoll: null,
 };
 
@@ -1025,31 +1027,39 @@ async function renderAgent(root) {
   const a = state.agent;
   const ai = state.status?.integrations.ai;
   $("#page-actions").innerHTML = `<button class="btn" id="ag-new">${icon("plus")}New chat</button>`;
-  $("#ag-new").onclick = async () => {
-    a.ctrl?.abort();
-    if (a.session) await api("/api/agent/reset", { method: "POST", body: { session_id: a.session } }).catch(() => {});
-    a.session = null; a.messages = []; renderAgent(root);
-  };
+  $("#ag-new").onclick = () => newChat();
   if (!ai?.ok) {
     root.innerHTML = `<div class="card"><div class="empty" style="padding:56px 20px"><h3>The agent needs Gemini</h3><p>Add <span class="mono">GEMINI_API_KEY</span> to the <span class="mono">.env</span> file in the project folder and restart YC Scout.</p><a class="btn" href="#/settings">Open settings</a></div></div>`;
     return;
   }
   const name = state.status?.sender_first_name;
   root.innerHTML = `
-    <div class="cx ${a.messages.length ? "" : "cx-empty"}" id="cx">
-      <div class="cx-log" id="cx-log"><div class="cx-col" id="cx-col"></div></div>
-      <div class="cx-dock">
-        <div class="cx-hero"><span class="cx-mark">${MARK}</span><h2>${greeting()}${name ? ", " + esc(name) : ""}</h2></div>
-        <form class="cx-composer" id="cx-form">
-          <textarea id="cx-input" rows="1" placeholder="How can I help you today?" autocomplete="off"></textarea>
-          <div class="cx-bar">
-            <span class="cx-model" title="Model">${MARK}${esc(ai.model || "Gemini")}</span>
-            <span class="grow"></span>
-            <button type="submit" class="cx-send" id="cx-send" aria-label="Send" disabled>${icon("arrowUp")}</button>
-          </div>
-        </form>
-        <div class="cx-chips">${SUGGESTIONS.map((s, i) => `<button class="cx-chip" data-s="${i}">${icon(s.icon)}${esc(s.text)}</button>`).join("")}</div>
-        <p class="cx-note">The agent works on your YC Scout data and can make mistakes. Emails are only sent after you confirm.</p>
+    <div class="ag">
+      <aside class="ag-side">
+        <div class="ag-side-head">
+          <div class="ag-search">${icon("search")}<input id="ag-filter" placeholder="Search chats" autocomplete="off"></div>
+        </div>
+        <div class="ag-list" id="ag-list"></div>
+        <div class="ag-side-foot">
+          <button class="ag-foot-btn" id="ag-memory">${icon("memory")}<span>Memory</span><span class="ag-count" id="ag-mem-count"></span></button>
+          <button class="ag-foot-btn danger" id="ag-clear">${icon("trash")}<span>Delete all chats</span></button>
+        </div>
+      </aside>
+      <div class="cx ${a.messages.length ? "" : "cx-empty"}" id="cx">
+        <div class="cx-log" id="cx-log"><div class="cx-col" id="cx-col"></div></div>
+        <div class="cx-dock">
+          <div class="cx-hero"><span class="cx-mark">${MARK}</span><h2>${greeting()}${name ? ", " + esc(name) : ""}</h2></div>
+          <form class="cx-composer" id="cx-form">
+            <textarea id="cx-input" rows="1" placeholder="How can I help you today?" autocomplete="off"></textarea>
+            <div class="cx-bar">
+              <span class="cx-model" title="Model">${MARK}${esc(ai.model || "Gemini")}</span>
+              <span class="grow"></span>
+              <button type="submit" class="cx-send" id="cx-send" aria-label="Send" disabled>${icon("arrowUp")}</button>
+            </div>
+          </form>
+          <div class="cx-chips">${SUGGESTIONS.map((s, i) => `<button class="cx-chip" data-s="${i}">${icon(s.icon)}${esc(s.text)}</button>`).join("")}</div>
+          <p class="cx-note">The agent works on your YC Scout data and can make mistakes. Emails are only sent after you confirm.</p>
+        </div>
       </div>
     </div>`;
   const input = $("#cx-input"), send = $("#cx-send");
@@ -1069,9 +1079,173 @@ async function renderAgent(root) {
     sendAgent(t);
   };
   $$("[data-s]", root).forEach((b) => (b.onclick = () => sendAgent(SUGGESTIONS[+b.dataset.s].text)));
+  $("#ag-filter").oninput = () => paintSide();
+  $("#ag-memory").onclick = () => openMemory();
+  $("#ag-clear").onclick = () => deleteAllChats();
   paintChat(true);
   setSendState();
   input.focus();
+  await loadChats();
+  refreshMemoryCount();
+}
+
+async function loadChats() {
+  try { state.agent.chats = await api("/api/chats"); } catch { state.agent.chats = state.agent.chats || []; }
+  paintSide();
+}
+
+function chatGroup(iso) {
+  const d = new Date(iso), now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 86400000);
+  return diff <= 0 ? "Today" : diff === 1 ? "Yesterday" : diff <= 7 ? "Previous 7 days" : diff <= 30 ? "Previous 30 days" : "Older";
+}
+
+function paintSide() {
+  const a = state.agent, list = $("#ag-list");
+  if (!list) return;
+  const q = ($("#ag-filter")?.value || "").trim().toLowerCase();
+  const chats = (a.chats || []).filter((c) => !q || (c.title || "").toLowerCase().includes(q));
+  if (!chats.length) {
+    list.innerHTML = `<div class="ag-empty">${q ? "No chats match." : "Your chats will appear here."}</div>`;
+    return;
+  }
+  let html = "", last = "";
+  for (const c of chats) {
+    const g = chatGroup(c.updated_at || c.created_at);
+    if (g !== last) { html += `<div class="ag-group">${g}</div>`; last = g; }
+    html += `<div class="ag-item ${c.id === a.session ? "active" : ""}" data-chat="${esc(c.id)}" title="${esc(c.title || "")}">
+      <span class="ag-title">${esc(c.title || "Untitled chat")}</span>
+      <span class="ag-acts"><button class="ag-act" data-rename="${esc(c.id)}" title="Rename">${icon("edit")}</button><button class="ag-act" data-del="${esc(c.id)}" title="Delete">${icon("trash")}</button></span>
+    </div>`;
+  }
+  list.innerHTML = html;
+  $$("[data-chat]", list).forEach((el) => (el.onclick = (e) => { if (!e.target.closest(".ag-act, input")) openChat(el.dataset.chat); }));
+  $$("[data-rename]", list).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); renameChat(b.dataset.rename); }));
+  $$("[data-del]", list).forEach((b) => (b.onclick = (e) => { e.stopPropagation(); deleteChat(b.dataset.del); }));
+}
+
+function busyGuard() {
+  if (state.agent.streaming) { toast("Wait for the answer to finish, or press Stop first."); return true; }
+  return false;
+}
+
+function newChat() {
+  if (busyGuard()) return;
+  const a = state.agent;
+  a.session = null; a.messages = [];
+  paintChat(true); paintSide(); setSendState();
+  $("#cx-input")?.focus();
+}
+
+async function openChat(id) {
+  const a = state.agent;
+  if (a.session === id || busyGuard()) return;
+  try {
+    const c = await api(`/api/chats/${encodeURIComponent(id)}`);
+    a.session = c.id;
+    a.messages = (c.messages || []).map((m) => (m.role === "user" ? m : { ...m, streaming: false }));
+    paintChat(true); paintSide(); setSendState();
+    $("#cx-input")?.focus();
+  } catch (e) { toast(e.message, "error"); }
+}
+
+function renameChat(id) {
+  const el = $(`[data-chat="${CSS.escape(id)}"] .ag-title`);
+  const chat = (state.agent.chats || []).find((c) => c.id === id);
+  if (!el || !chat) return;
+  const inp = document.createElement("input");
+  inp.className = "ag-rename"; inp.value = chat.title || ""; inp.maxLength = 120;
+  el.replaceWith(inp); inp.focus(); inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const title = inp.value.trim();
+    if (save && title && title !== chat.title) {
+      try { await api(`/api/chats/${encodeURIComponent(id)}`, { method: "PATCH", body: { title } }); chat.title = title; } catch (e) { toast(e.message, "error"); }
+    }
+    paintSide();
+  };
+  inp.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); finish(true); } else if (e.key === "Escape") finish(false); };
+  inp.onblur = () => finish(true);
+  inp.onclick = (e) => e.stopPropagation();
+}
+
+async function deleteChat(id) {
+  const a = state.agent;
+  const chat = (a.chats || []).find((c) => c.id === id);
+  if (a.streaming && a.session === id) return busyGuard();
+  const ok = await confirmModal({ title: "Delete chat?", body: `<p>This permanently deletes <b>${esc(chat?.title || "this chat")}</b>. Memories it saved stay until you delete them in Memory.</p>`, confirm: "Delete", danger: true });
+  if (!ok) return;
+  try {
+    await api(`/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
+    a.chats = (a.chats || []).filter((c) => c.id !== id);
+    if (a.session === id) { a.session = null; a.messages = []; paintChat(true); setSendState(); }
+    paintSide();
+    toast("Chat deleted");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function deleteAllChats() {
+  const a = state.agent;
+  if (busyGuard()) return;
+  if (!(a.chats || []).length) return toast("No chats to delete.");
+  const ok = await confirmModal({ title: "Delete all chats?", body: `<p>This permanently deletes all ${plural(a.chats.length, "chat")}. Your memory is kept; clear it separately in Memory.</p>`, confirm: "Delete all", danger: true });
+  if (!ok) return;
+  try {
+    await api("/api/chats", { method: "DELETE" });
+    a.chats = []; a.session = null; a.messages = [];
+    paintChat(true); paintSide(); setSendState();
+    toast("All chats deleted");
+  } catch (e) { toast(e.message, "error"); }
+}
+
+async function refreshMemoryCount() {
+  try {
+    const m = await api("/api/memories");
+    const el = $("#ag-mem-count");
+    if (el) { el.textContent = m.enabled ? (m.items.length || "") : "off"; el.classList.toggle("off", !m.enabled); }
+  } catch { /* ignore */ }
+}
+
+async function openMemory() {
+  let data;
+  try { data = await api("/api/memories"); } catch (e) { return toast(e.message, "error"); }
+  const paint = (m) => {
+    const items = m.items.map((x) => `<div class="mem-row"><span class="grow">${esc(x.text)}</span><span class="badge ${x.source === "you" ? "b-blue" : ""}">${x.source === "you" ? "added by you" : "learned"}</span><button class="btn btn-ghost btn-sm btn-icon" data-mdel="${x.id}" title="Delete">${icon("trash")}</button></div>`).join("");
+    return `
+      <div class="modal-head"><h3>Memory</h3><p>What the agent remembers about you across chats. It uses these quietly to tailor answers and emails.</p></div>
+      <div class="modal-body">
+        <label class="mem-toggle"><span><b>Use memory</b><br><span class="muted">When off, the agent neither reads nor saves memories.</span></span><span class="switch"><input type="checkbox" id="mem-on" ${m.enabled ? "checked" : ""}><span></span></span></label>
+        <div class="mem-list">${items || '<div class="ag-empty" style="padding:14px 4px">Nothing saved yet. Tell the agent things like "I only want remote roles open to India" and it will remember.</div>'}</div>
+        <form class="row" id="mem-add"><input class="input grow" name="text" placeholder="Add something to remember" maxlength="400" autocomplete="off"><button class="btn" type="submit">${icon("plus")}Add</button></form>
+      </div>
+      <div class="modal-foot"><button class="btn btn-danger" id="mem-clear" ${m.items.length ? "" : "disabled"}>Clear all memory</button><span class="grow"></span><button class="btn btn-primary" id="mem-close">Done</button></div>`;
+  };
+  const mount = (modal) => {
+    $("#mem-close", modal).onclick = () => { closeModal(); refreshMemoryCount(); };
+    $("#mem-on", modal).onchange = async (e) => {
+      try { data.enabled = (await api("/api/memories/enabled", { method: "PUT", body: { enabled: e.target.checked } })).enabled; } catch (err) { toast(err.message, "error"); }
+      refreshMemoryCount();
+    };
+    $$("[data-mdel]", modal).forEach((b) => (b.onclick = async () => {
+      await api(`/api/memories/${b.dataset.mdel}`, { method: "DELETE" });
+      data = await api("/api/memories"); rerender();
+    }));
+    $("#mem-add", modal).onsubmit = async (e) => {
+      e.preventDefault();
+      const text = new FormData(e.target).get("text").trim();
+      if (!text) return;
+      try { await api("/api/memories", { method: "POST", body: { text } }); data = await api("/api/memories"); rerender(); } catch (err) { toast(err.message, "error"); }
+    };
+    $("#mem-clear", modal).onclick = async () => {
+      if (!window.confirm("Delete every memory? This can't be undone.")) return;
+      await api("/api/memories", { method: "DELETE" });
+      data = await api("/api/memories"); rerender();
+    };
+  };
+  const rerender = () => { $("#modal").innerHTML = paint(data); hydrateIcons($("#modal")); mount($("#modal")); refreshMemoryCount(); };
+  openModal(paint(data), mount);
 }
 
 function setSendState() {
@@ -1178,7 +1352,14 @@ async function sendAgent(text) {
   setSendState();
   const closeThinking = () => { const l = m.blocks[m.blocks.length - 1]; if (l && l.kind === "thinking" && !l.t1) l.t1 = Date.now(); };
   const handle = (ev) => {
-    if (ev.type === "session") { a.session = ev.session_id; }
+    if (ev.type === "session") {
+      a.session = ev.session_id;
+      const now = new Date().toISOString();
+      const ex = (a.chats || []).find((c) => c.id === ev.session_id);
+      if (ex) { ex.updated_at = now; a.chats = [ex, ...a.chats.filter((c) => c !== ex)]; }
+      else a.chats = [{ id: ev.session_id, title: ev.title, created_at: now, updated_at: now }, ...(a.chats || [])];
+      paintSide();
+    }
     else if (ev.type === "thinking") {
       const l = m.blocks[m.blocks.length - 1];
       if (l && l.kind === "thinking" && !l.t1) l.text += ev.text; else m.blocks.push({ kind: "thinking", text: ev.text, t0: Date.now() });
@@ -1195,7 +1376,7 @@ async function sendAgent(text) {
     } else if (ev.type === "runs") { m.runs = ev.runs; pollStatus(); }
     else if (ev.type === "confirm") { m.confirm = ev; }
     else if (ev.type === "error") { m.error = ev.message; }
-    else if (ev.type === "done") { if (ev.session_reset) a.session = null; if (ev.changed) pollStatus(); }
+    else if (ev.type === "done") { if (ev.changed) pollStatus(); if (ev.memory_changed) refreshMemoryCount(); }
     schedulePaint();
   };
   try {

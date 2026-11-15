@@ -43,7 +43,7 @@ EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 GEMINI_API_KEY = _env("GEMINI_API_KEY") or _env("GOOGLE_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.5-flash")
 # Tried in order when the main model is rate-limited, overloaded or unavailable.
-GEMINI_FALLBACK_MODELS = [m.strip() for m in (_env("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-flash-latest") or "").split(",") if m.strip()]
+GEMINI_FALLBACK_MODELS = [m.strip() for m in (_env("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-flash-lite-latest,gemini-3.1-flash-lite") or "").split(",") if m.strip()]
 # Requests per minute across the whole app (free tier is ~10/min on Flash models).
 GEMINI_RPM = _env_int("GEMINI_RPM", 10)
 # Web research needs Google Search grounding; on free keys that quota exists on 2.5 Flash.

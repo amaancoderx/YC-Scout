@@ -545,6 +545,68 @@ def agent_stream(payload: dict = Body(...)):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+@app.get("/api/chats")
+def chats_list():
+    return agent.list_chats()
+
+
+@app.get("/api/chats/{chat_id}")
+def chats_get(chat_id: str):
+    c = agent.get_chat(chat_id)
+    if not c:
+        raise HTTPException(404, "Chat not found")
+    return c
+
+
+@app.patch("/api/chats/{chat_id}")
+def chats_rename(chat_id: str, payload: dict = Body(...)):
+    if not agent.get_chat(chat_id):
+        raise HTTPException(404, "Chat not found")
+    agent.rename_chat(chat_id, str(payload.get("title") or ""))
+    return {"ok": True}
+
+
+@app.delete("/api/chats/{chat_id}")
+def chats_delete(chat_id: str):
+    agent.delete_chat(chat_id)
+    return {"ok": True}
+
+
+@app.delete("/api/chats")
+def chats_delete_all():
+    return {"deleted": agent.delete_all_chats()}
+
+
+@app.get("/api/memories")
+def memories_list():
+    return {"enabled": bool(db.get_setting("memory_enabled", True)), "items": agent.list_memories()}
+
+
+@app.post("/api/memories")
+def memories_add(payload: dict = Body(...)):
+    try:
+        return agent.add_memory(str(payload.get("text") or ""), source="you")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.delete("/api/memories/{memory_id}")
+def memories_delete(memory_id: int):
+    agent.delete_memory(memory_id)
+    return {"ok": True}
+
+
+@app.delete("/api/memories")
+def memories_clear():
+    return {"deleted": agent.clear_memories()}
+
+
+@app.put("/api/memories/enabled")
+def memories_toggle(payload: dict = Body(...)):
+    db.set_settings({"memory_enabled": bool(payload.get("enabled"))})
+    return {"enabled": bool(db.get_setting("memory_enabled", True))}
+
+
 @app.post("/api/agent/reset")
 def agent_reset(payload: dict = Body(...)):
     if payload.get("session_id"):

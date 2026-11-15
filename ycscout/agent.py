@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
 from datetime import date, timedelta
 from typing import Iterator
@@ -35,7 +36,9 @@ You act through tools on the user's local database. Work like a sharp sales-ops 
 The user (the sender of all outreach):
 {profile}
 
-What they want from outreach: {goal}"""
+What they want from outreach: {goal}
+
+{memory}"""
 
 TOOLS = [
     {
@@ -343,6 +346,14 @@ def _run_tool(name: str, args: dict, ctx: dict) -> object:
                 "skipped_already_researched": 0 if force else len(already)}
     if name == "stats":
         return stats()
+    if name == "remember":
+        res = add_memory(args.get("fact") or "", source="agent", chat_id=ctx.get("chat_id"))
+        ctx["memory_changed"] = True
+        return res
+    if name == "forget":
+        ok = delete_memory(int(args.get("memory_id") or 0))
+        ctx["memory_changed"] = True
+        return {"deleted": ok}
     return {"error": f"unknown tool {name}"}
 
 
@@ -370,13 +381,29 @@ TOOL_LABELS = {
     "start_sync": "Starting a sync",
     "research_companies": "Starting AI research",
     "stats": "Reading database stats",
+    "remember": "Saving to memory",
+    "forget": "Updating memory",
 }
 
 
-def _declarations() -> list[T.Tool]:
+MEMORY_TOOLS = [
+    {
+        "name": "remember",
+        "description": "Save one durable fact or preference about the user for future chats (goals, preferences, constraints, companies to avoid). Not for one-off requests or secrets.",
+        "input_schema": {"type": "object", "properties": {"fact": {"type": "string", "description": "One short sentence in third person, e.g. 'Prefers remote roles open to India.'"}}, "required": ["fact"]},
+    },
+    {
+        "name": "forget",
+        "description": "Delete a saved memory by its id when the user asks to forget it or it is no longer true.",
+        "input_schema": {"type": "object", "properties": {"memory_id": {"type": "integer"}}, "required": ["memory_id"]},
+    },
+]
+
+
+def _declarations(memory_on: bool = True) -> list[T.Tool]:
     return [T.Tool(function_declarations=[
         T.FunctionDeclaration(name=t["name"], description=t["description"], parameters_json_schema=t["input_schema"])
-        for t in TOOLS
+        for t in TOOLS + (MEMORY_TOOLS if memory_on else [])
     ])]
 
 
@@ -395,6 +422,10 @@ def _tool_summary(name: str, out: object) -> str:
         return f"{out.get('approved', 0)} approved"
     if name == "request_send" and isinstance(out, dict):
         return f"{out.get('approved_in_queue', 0)} ready to send"
+    if name == "remember" and isinstance(out, dict):
+        return "already remembered" if out.get("duplicate") else "saved"
+    if name == "forget" and isinstance(out, dict):
+        return "forgotten" if out.get("deleted") else "not found"
     if isinstance(out, dict) and out.get("status") == "skipped":
         return "already up to date" if name == "start_sync" else "already researched"
     if name == "research_companies" and isinstance(out, dict) and out.get("skipped_already_researched"):
@@ -408,21 +439,205 @@ def _plain(obj):
     return json.loads(json.dumps(obj, default=str, ensure_ascii=False))
 
 
-def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
-    """Run one user turn and yield UI events:
-    session, thinking, text, tool_start, tool_end, runs, confirm, error, done."""
-    session_id = session_id or uuid.uuid4().hex
-    yield {"type": "session", "session_id": session_id, "model": ai.model_label()}
+# ---------------------------------------------------------------------------
+# Saved chats and memory
+# ---------------------------------------------------------------------------
+HISTORY_KEEP = 80  # Gemini turns kept per chat (older turns are trimmed, the transcript stays)
+
+
+def _title_from(message: str) -> str:
+    t = " ".join(message.split())
+    if len(t) <= 60:
+        return t
+    cut = t[:60].rsplit(" ", 1)[0]
+    return (cut or t[:60]) + "…"
+
+
+def list_chats(limit: int = 200) -> list[dict]:
+    return db.query("SELECT id, title, created_at, updated_at FROM chats ORDER BY updated_at DESC LIMIT ?", (limit,))
+
+
+def get_chat(chat_id: str) -> dict | None:
+    row = db.one("SELECT id, title, messages, created_at, updated_at FROM chats WHERE id=?", (chat_id,))
+    if not row:
+        return None
+    row["messages"] = db.loads(row["messages"], [])
+    return row
+
+
+def rename_chat(chat_id: str, title: str) -> None:
+    db.execute("UPDATE chats SET title=? WHERE id=?", (title.strip()[:120] or "Untitled chat", chat_id))
+
+
+def delete_chat(chat_id: str) -> None:
+    db.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+    reset(chat_id)
+
+
+def delete_all_chats() -> int:
+    n = db.scalar("SELECT COUNT(*) FROM chats") or 0
+    db.execute("DELETE FROM chats")
     with _sessions_lock:
-        history: list[T.Content] = _sessions.setdefault(session_id, [])
+        _sessions.clear()
+    return n
+
+
+def _load(chat_id: str) -> tuple[list[T.Content], list[dict], str | None, bool]:
+    """(gemini history, ui transcript, title, exists)"""
+    row = db.one("SELECT title, history, messages FROM chats WHERE id=?", (chat_id,))
+    if not row:
+        return [], [], None, False
+    with _sessions_lock:
+        cached = _sessions.get(chat_id)
+    if cached is not None:
+        history = cached
+    else:
+        history = []
+        for c in db.loads(row["history"], []):
+            try:
+                history.append(T.Content.model_validate(c))
+            except Exception:
+                continue
+    return history, db.loads(row["messages"], []), row["title"], True
+
+
+def _trim(history: list[T.Content]) -> list[T.Content]:
+    """Keep the last HISTORY_KEEP turns, starting at a real user message so calls and results stay paired."""
+    if len(history) <= HISTORY_KEEP:
+        return history
+    for i in range(len(history) - HISTORY_KEEP, len(history)):
+        c = history[i]
+        if c.role == "user" and any(p.text and not p.function_response for p in (c.parts or [])):
+            return history[i:]
+    return history[-HISTORY_KEEP:]
+
+
+def _save(chat_id: str, title: str, history: list[T.Content], messages: list[dict], created: bool) -> None:
+    hist_json = json.dumps([c.model_dump(mode="json", exclude_none=True) for c in history], ensure_ascii=False)
+    msgs_json = json.dumps(messages, ensure_ascii=False, default=str)
+    now = db.now()
+    if created:
+        db.execute("INSERT INTO chats(id, title, history, messages, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+                   (chat_id, title, hist_json, msgs_json, now, now))
+    else:
+        db.execute("UPDATE chats SET history=?, messages=?, updated_at=? WHERE id=?", (hist_json, msgs_json, now, chat_id))
+
+
+def list_memories() -> list[dict]:
+    return db.query("SELECT id, text, source, created_at FROM memories ORDER BY id")
+
+
+def add_memory(text: str, source: str = "you", chat_id: str | None = None) -> dict:
+    text = " ".join((text or "").split())[:400]
+    if not text:
+        raise ValueError("Memory is empty")
+    existing = db.one("SELECT id, text FROM memories WHERE lower(text)=lower(?)", (text,))
+    if existing:
+        return {**existing, "duplicate": True}
+    mid = db.execute("INSERT INTO memories(text, source, chat_id, created_at) VALUES (?,?,?,?)",
+                     (text, source, chat_id, db.now()))
+    return {"id": mid, "text": text}
+
+
+def delete_memory(memory_id: int) -> bool:
+    found = db.scalar("SELECT 1 FROM memories WHERE id=?", (int(memory_id),))
+    db.execute("DELETE FROM memories WHERE id=?", (int(memory_id),))
+    return bool(found)
+
+
+def clear_memories() -> int:
+    n = db.scalar("SELECT COUNT(*) FROM memories") or 0
+    db.execute("DELETE FROM memories")
+    return n
+
+
+def _memory_block(enabled: bool) -> str:
+    if not enabled:
+        return "Memory is turned off by the user. Do not save or mention memories."
+    mems = list_memories()
+    lines = "\n".join(f"- [{m['id']}] {m['text']}" for m in mems) or "(nothing saved yet)"
+    return ("Memory: durable facts and preferences the user shared in earlier chats. Use them silently; "
+            "don't recite them unless asked.\n" + lines + "\n"
+            "When the user states a lasting preference, goal, constraint or fact about themselves or their outreach "
+            "(not a one-off request), call remember with one short sentence. If they ask you to forget something, or a "
+            "memory is now wrong, call forget with its id. Never store passwords, keys or other secrets.")
+
+
+# ---------------------------------------------------------------------------
+# Conversation loop (Gemini, streamed)
+# ---------------------------------------------------------------------------
+def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
+    """Run one user turn, persist the chat, and yield UI events:
+    session, thinking, text, tool_start, tool_end, runs, confirm, error, done."""
+    chat_id = session_id or uuid.uuid4().hex
+    history, messages, title, exists = _load(chat_id)
+    title = title or _title_from(message)
+    yield {"type": "session", "session_id": chat_id, "title": title, "model": ai.model_label(), "new": not exists}
+
+    now_ms = lambda: int(time.time() * 1000)  # noqa: E731
+    bot: dict = {"role": "bot", "blocks": [], "ts": now_ms()}
+    messages.append({"role": "user", "text": message, "ts": now_ms()})
+    messages.append(bot)
+    blocks = bot["blocks"]
+
+    def close_thinking():
+        if blocks and blocks[-1]["kind"] == "thinking" and not blocks[-1].get("t1"):
+            blocks[-1]["t1"] = now_ms()
+
+    ctx: dict = {"runs": [], "confirm": None, "changed": False, "memory_changed": False, "chat_id": chat_id}
+    for ev in _run_turn(history, message, ctx):
+        t = ev["type"]
+        if t == "thinking":
+            if blocks and blocks[-1]["kind"] == "thinking" and not blocks[-1].get("t1"):
+                blocks[-1]["text"] += ev["text"]
+            else:
+                blocks.append({"kind": "thinking", "text": ev["text"], "t0": now_ms()})
+        elif t == "text":
+            close_thinking()
+            if blocks and blocks[-1]["kind"] == "text":
+                blocks[-1]["text"] += ev["text"]
+            else:
+                blocks.append({"kind": "text", "text": ev["text"]})
+        elif t == "tool_start":
+            close_thinking()
+            blocks.append({"kind": "tool", "id": ev["id"], "name": ev["name"], "label": ev["label"], "input": ev["input"]})
+        elif t == "tool_end":
+            for b in blocks:
+                if b["kind"] == "tool" and b["id"] == ev["id"]:
+                    b.update(done=True, ok=ev["ok"], summary=ev["summary"])
+        elif t == "error":
+            bot["error"] = ev["message"]
+        yield ev
+    close_thinking()
+    if ctx["runs"]:
+        bot["runs"] = ctx["runs"]
+        yield {"type": "runs", "runs": ctx["runs"]}
+    if ctx["confirm"]:
+        bot["confirm"] = ctx["confirm"]
+        yield {"type": "confirm", **ctx["confirm"]}
+
+    history[:] = _trim(history)
+    with _sessions_lock:
+        _sessions[chat_id] = history
+    try:
+        _save(chat_id, title, history, messages, created=not exists)
+    except Exception as exc:  # never lose the answer because saving failed
+        yield {"type": "error", "message": f"Couldn't save this chat: {exc}"}
+    yield {"type": "done", "changed": ctx["changed"], "memory_changed": ctx["memory_changed"],
+           "title": title, "session_id": chat_id, "session_reset": False}
+
+
+def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dict]:
     history.append(T.Content(role="user", parts=[T.Part(text=message)]))
-    ctx: dict = {"runs": [], "confirm": None, "changed": False}
     settings = db.all_settings()
+    memory_on = bool(settings.get("memory_enabled", True))
     system = SYSTEM.format(today=date.today().isoformat(),
                            profile=(settings.get("sender_profile") or "(not filled in yet)")[:6000],
-                           goal=settings.get("outreach_goal") or "")
-    base = dict(system_instruction=system, tools=_declarations(),
+                           goal=settings.get("outreach_goal") or "",
+                           memory=_memory_block(memory_on))
+    base = dict(system_instruction=system, tools=_declarations(memory_on),
                 thinking_config=T.ThinkingConfig(include_thoughts=True))
+
     try:
         nudges = 0
         for step in range(MAX_STEPS + 1):
@@ -497,18 +712,9 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
         msg = str(exc) if isinstance(exc, ai.AIError) else f"Something went wrong: {exc}"
         yield {"type": "error", "message": msg}
 
-    if ctx["runs"]:
-        yield {"type": "runs", "runs": ctx["runs"]}
-    if ctx["confirm"]:
-        yield {"type": "confirm", **ctx["confirm"]}
-    reset_note = False
-    if len(history) > 120:
-        reset(session_id)
-        reset_note = True
-    yield {"type": "done", "changed": ctx["changed"], "session_reset": reset_note}
 
 
-def chat(session_id: str | None, message: str) -> dict:
+def chat(session_id: str | None, message: str) -> dict:  # noqa: F811
     """Non-streaming wrapper (CLI, tests)."""
     out = {"session_id": session_id, "reply": "", "actions": [], "runs": [], "confirm": None,
            "changed": False, "session_reset": False}

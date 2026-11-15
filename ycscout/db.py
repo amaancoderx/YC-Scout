@@ -178,6 +178,27 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+-- Agent conversations: Gemini history (to continue) + UI transcript (to show).
+CREATE TABLE IF NOT EXISTS chats (
+    id          TEXT PRIMARY KEY,
+    title       TEXT,
+    history     TEXT DEFAULT '[]',
+    messages    TEXT DEFAULT '[]',
+    created_at  TEXT,
+    updated_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at);
+
+-- Long-term memory the agent carries across chats.
+CREATE TABLE IF NOT EXISTS memories (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    text        TEXT NOT NULL,
+    source      TEXT DEFAULT 'agent',      -- agent | you
+    chat_id     TEXT,
+    created_at  TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_text ON memories(lower(text));
 """
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -214,6 +235,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "auto_sheet_sync": True,
     # One per line:  keyword, keyword => proof line used in emails ({{proof_line}})
     "fit_strengths": "",
+    "memory_enabled": True,
     "default_proof_line": "",
 }
 
