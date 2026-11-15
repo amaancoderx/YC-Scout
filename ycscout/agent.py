@@ -27,8 +27,9 @@ You act through tools on the user's local database. Work like a sharp sales-ops 
 - Use search_companies to find targets; combine filters rather than guessing ids.
 - When the user asks for outreach, draft first (draft_emails), then summarize what was drafted. Drafts can be reviewed on the Outreach page.
 - Approve drafts only when the user explicitly asks you to approve or send them.
-- Sending: call request_send, then tell the user how many approved emails are ready and ask them to reply "send" (or click Confirm and send).
-  Only when their NEXT message clearly confirms, call confirm_send. Never call confirm_send in the same turn as request_send,
+- Decisions: when you need the user to choose or confirm something, call ask_user with 2-4 short options instead of asking in plain text.
+- Sending: call request_send. It shows the user a "Send N emails now?" card with Yes / Not now; stop and wait.
+  If they confirm by typing instead (e.g. "yes, send") in their NEXT message, call confirm_send. Never call confirm_send in the same turn as request_send,
   never treat earlier or vague messages as confirmation, and never claim emails were sent unless confirm_send started a job.
 - You can operate the entire product by prompt: sync, refresh, research, draft, edit, approve, unapprove, delete, retry, send (with confirmation),
   check replies, create follow-ups, mark replied, export Excel/CSV (give the download link), push to Google Sheets, change settings and templates,
@@ -498,6 +499,14 @@ SETTING_LIMITS = {"daily_send_limit": (1, 500), "send_delay_seconds": (5, 3600),
                   "max_followups": (0, 5), "auto_sync_hours": (1, 720)}
 
 OPS_TOOLS = [
+    {"name": "ask_user", "description": "Ask the user to choose between options with a clickable question card (like a form). Use it whenever you need a decision or confirmation: which batch, AI vs template emails, CEO vs all founders, how many companies, risky deletes. After calling it, stop; the answer arrives as the user's next message.",
+     "input_schema": {"type": "object", "properties": {
+         "question": {"type": "string", "description": "One short, clear question ending with a question mark."},
+         "options": {"type": "array", "minItems": 2, "maxItems": 4, "items": {"type": "object", "properties": {
+             "label": {"type": "string", "description": "1-5 words, the choice itself."},
+             "description": {"type": "string", "description": "What happens if chosen, one short line."}}, "required": ["label"]}},
+         "multi_select": {"type": "boolean", "description": "Allow picking several options."}},
+         "required": ["question", "options"]}},
     {"name": "refresh_companies", "description": "Re-collect YC page, website and emails for specific companies now (background job). Use when the user asks to refresh/update a company.",
      "input_schema": {"type": "object", "properties": {"company_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["company_ids"]}},
     {"name": "add_contact", "description": "Add an email the user knows for a company (saved as verified). Optionally attach it to a founder by name.",
@@ -528,6 +537,7 @@ OPS_TOOLS = [
 TOOLS.extend(OPS_TOOLS)
 
 OPS_LABELS = {
+    "ask_user": "Asking you",
     "refresh_companies": "Refreshing company data", "add_contact": "Adding email", "remove_contact": "Removing email",
     "export_data": "Preparing export", "sync_google_sheet": "Syncing Google Sheet", "manage_emails": "Updating emails",
     "check_replies": "Checking inbox", "create_followups": "Creating follow-ups", "confirm_send": "Sending emails",
@@ -562,6 +572,14 @@ def _refresh_job(run, ids: list[int]) -> str:
 
 
 def _ops_tool(name: str, args: dict, ctx: dict):
+    if name == "ask_user":
+        opts = [{"label": str(o.get("label") or "").strip()[:60], "description": str(o.get("description") or "").strip()[:160]}
+                for o in (args.get("options") or []) if str(o.get("label") or "").strip()][:4]
+        if len(opts) < 2:
+            return {"error": "give at least two options"}
+        ctx["ask"] = {"id": uuid.uuid4().hex[:12], "purpose": "ask", "question": str(args.get("question") or "").strip()[:240],
+                      "options": opts, "multi": bool(args.get("multi_select")), "allow_other": True}
+        return {"status": "shown to the user", "note": "Stop here. Their answer arrives as the next message."}
     if name == "refresh_companies":
         ids = list(dict.fromkeys(int(i) for i in args.get("company_ids") or []))
         if not ids:
@@ -636,6 +654,9 @@ def _ops_tool(name: str, args: dict, ctx: dict):
         ctx["changed"] = True
         return {"followup_drafts_created": n}
     if name == "confirm_send":
+        said = (ctx.get("user_message") or "").lower()
+        if not re.search(r"\b(yes|yep|yeah|send|go ahead|confirm|do it)\b", said) or re.search(r"\b(no|not|don'?t|before|wait|later|cancel)\b", said):
+            return {"error": "The user's latest message is not an explicit confirmation to send. Use request_send to ask them."}
         chat_id = ctx.get("chat_id")
         asked = _pending_send.get(chat_id or "")
         if not asked or asked >= ctx.get("turn_started", 0) or time.time() - asked > SEND_CONFIRM_WINDOW:
@@ -752,9 +773,13 @@ def _run_tool(name: str, args: dict, ctx: dict) -> object:
         return {"approved": n}
     if name == "request_send":
         n = db.scalar("SELECT COUNT(*) FROM outreach WHERE status='approved'") or 0
-        ctx["confirm"] = {"action": "send", "count": n}
         if n and ctx.get("chat_id"):
             _pending_send[ctx["chat_id"]] = time.time()
+            limit = db.get_setting("daily_send_limit")
+            ctx["ask"] = {"id": uuid.uuid4().hex[:12], "purpose": "send", "allow_other": False, "multi": False,
+                          "question": f"Send {n} approved email{'s' if n != 1 else ''} now?",
+                          "options": [{"label": "Yes, send", "description": f"They go out one by one from {config.FROM_EMAIL or 'your mailbox'}, within your {limit}/day limit."},
+                                      {"label": "Not now", "description": "Keep them approved. Nothing is sent."}]}
         return {"pending_user_confirmation": True, "approved_in_queue": n,
                 "daily_limit": db.get_setting("daily_send_limit"), "sent_today": outreach.sent_today()}
     if name == "start_sync":
@@ -911,6 +936,8 @@ def _tool_summary(name: str, out: object) -> str:
             return str(out.get("detail", "ok"))[:60]
     if name == "do_not_contact" and isinstance(out, list):
         return f"{len(out)} on the list"
+    if name == "ask_user":
+        return "waiting for your answer"
     if name == "remember" and isinstance(out, dict):
         return "already remembered" if out.get("duplicate") else "saved"
     if name == "forget" and isinstance(out, dict):
@@ -1055,7 +1082,7 @@ def _memory_block(enabled: bool) -> str:
 # ---------------------------------------------------------------------------
 # Conversation loop (Gemini, streamed)
 # ---------------------------------------------------------------------------
-def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
+def chat_stream(session_id: str | None, message: str, answer: dict | None = None) -> Iterator[dict]:
     """Run one user turn, persist the chat, and yield UI events:
     session, thinking, text, tool_start, tool_end, runs, confirm, error, done."""
     chat_id = session_id or uuid.uuid4().hex
@@ -1074,8 +1101,52 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
             blocks[-1]["t1"] = now_ms()
 
     ctx: dict = {"runs": [], "confirm": None, "changed": False, "memory_changed": False, "chat_id": chat_id,
-                 "turn_started": time.time()}
-    for ev in _run_turn(history, message, ctx):
+                 "turn_started": time.time(), "user_message": message}
+
+    # Close the open question card (answered, or skipped because the user typed something else).
+    open_q = next((b for m in reversed(messages[:-2]) if m.get("role") == "bot"
+                   for b in reversed(m.get("blocks") or []) if b.get("kind") == "question" and "answer" not in b), None)
+    model_message = message
+    fixed_reply = None
+    if open_q is not None:
+        answered = bool(answer) and answer.get("question_id") == open_q["id"]
+        open_q["answer"] = message if answered else None
+        if answered and open_q.get("purpose") == "send":
+            if message.lower().startswith("yes"):
+                # The user clicked "Yes, send": start sending directly (guards still apply).
+                yield {"type": "tool_start", "id": "send-" + open_q["id"], "name": "confirm_send",
+                       "label": OPS_LABELS["confirm_send"], "input": {}}
+                blocks.append({"kind": "tool", "id": "send-" + open_q["id"], "name": "confirm_send",
+                               "label": OPS_LABELS["confirm_send"], "input": {}})
+                res = _ops_tool("confirm_send", {}, ctx)
+                ok = not res.get("error")
+                summary = _tool_summary("confirm_send", res)
+                blocks[-1].update(done=True, ok=ok, summary=summary)
+                yield {"type": "tool_end", "id": "send-" + open_q["id"], "name": "confirm_send", "ok": ok, "summary": summary}
+                n = res.get("sending")
+                reply = (f"Sending started: {n} email{'s' if n != 1 else ''} going out one by one (job #{res.get('job_id')}). "
+                         "Replies and bounces are picked up automatically, and follow-ups are drafted if someone doesn't answer."
+                         if ok else f"I couldn't start sending: {res.get('error')}")
+            else:
+                _pending_send.pop(chat_id, None)
+                n = db.scalar("SELECT COUNT(*) FROM outreach WHERE status='approved'") or 0
+                reply = (f"Okay, nothing was sent. The {n} approved email{'s' if n != 1 else ''} stay in your queue; "
+                         "say \"send\" whenever you're ready.")
+            # Deterministic reply: no model call, so nothing can be sent twice or by mistake.
+            fixed_reply = reply
+        elif answered:
+            model_message = f"My answer to your question \"{open_q['question']}\": {message}"
+
+    if fixed_reply is not None:
+        blocks.append({"kind": "text", "text": fixed_reply})
+        yield {"type": "text", "text": fixed_reply}
+        if history and history[-1].role == "user":
+            history[-1].parts.append(T.Part(text=message))
+        else:
+            history.append(T.Content(role="user", parts=[T.Part(text=message)]))
+        history.append(T.Content(role="model", parts=[T.Part(text=fixed_reply)]))
+    turn = iter(()) if fixed_reply is not None else _run_turn(history, model_message, ctx)
+    for ev in turn:
         t = ev["type"]
         if t == "thinking":
             if blocks and blocks[-1]["kind"] == "thinking" and not blocks[-1].get("t1"):
@@ -1095,6 +1166,9 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
             for b in blocks:
                 if b["kind"] == "tool" and b["id"] == ev["id"]:
                     b.update(done=True, ok=ev["ok"], summary=ev["summary"])
+        elif t == "question":
+            close_thinking()
+            blocks.append({"kind": "question", **{k: v for k, v in ev.items() if k != "type"}})
         elif t == "error":
             bot["error"] = ev["message"]
         yield ev
@@ -1102,9 +1176,6 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
     if ctx["runs"]:
         bot["runs"] = ctx["runs"]
         yield {"type": "runs", "runs": ctx["runs"]}
-    if ctx["confirm"]:
-        bot["confirm"] = ctx["confirm"]
-        yield {"type": "confirm", **ctx["confirm"]}
 
     history[:] = _trim(history)
     with _sessions_lock:
@@ -1118,7 +1189,10 @@ def chat_stream(session_id: str | None, message: str) -> Iterator[dict]:
 
 
 def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dict]:
-    history.append(T.Content(role="user", parts=[T.Part(text=message)]))
+    if history and history[-1].role == "user":
+        history[-1].parts.append(T.Part(text=message))
+    else:
+        history.append(T.Content(role="user", parts=[T.Part(text=message)]))
     settings = db.all_settings()
     memory_on = bool(settings.get("memory_enabled", True))
     system = SYSTEM.format(today=date.today().isoformat(),
@@ -1132,7 +1206,7 @@ def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dic
     try:
         nudges = 0
         for step in range(MAX_STEPS + 1):
-            final = step == MAX_STEPS
+            final = step == MAX_STEPS or bool(ctx.get("tools_off"))
             cfg = T.GenerateContentConfig(**base, tool_config=T.ToolConfig(
                 function_calling_config=T.FunctionCallingConfig(mode="NONE" if final else "AUTO")))
             parts_out: list[T.Part] = []
@@ -1196,6 +1270,9 @@ def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dic
                 responses.append(T.Part(function_response=T.FunctionResponse(
                     id=fc.id, name=name, response={"result": payload})))
             history.append(T.Content(role="user", parts=responses))
+            if ctx.get("ask"):
+                yield {"type": "question", **ctx["ask"]}
+                break
     except Exception as exc:
         # Keep history valid for the next turn: drop a dangling model turn.
         while history and history[-1].role == "model":

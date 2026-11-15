@@ -629,3 +629,36 @@ html, body, * { scrollbar-width: thin; scrollbar-color: var(--border-strong) tra
 .mem-list { display: grid; gap: 6px; max-height: 320px; overflow-y: auto; }
 .mem-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px 9px 12px; border: 1px solid var(--border); border-radius: 10px; font-size: 13px; line-height: 1.45; }
 @media (max-width: 960px) { .ag { grid-template-columns: 1fr; } .ag-side { display: none; } }
+
+/* ---------------------------------------------------------------------------
+   Agent question cards (choose / confirm)
+   --------------------------------------------------------------------------- */
+.qa { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); padding: 14px; display: grid; gap: 10px; max-width: 620px;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, .04); font-family: var(--font); }
+.qa.live { border-color: color-mix(in srgb, var(--chat-accent) 45%, var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-accent) 12%, transparent); }
+.qa-q { font-size: 14.5px; font-weight: 600; color: var(--text); line-height: 1.45; }
+.qa-opts { display: grid; gap: 6px; }
+.qa-opt { display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; padding: 9px 11px; border: 1px solid var(--border); border-radius: 10px;
+          background: var(--surface-2); color: var(--text); cursor: pointer; transition: border-color .12s, background .12s; }
+.qa-opt:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-hover); }
+.qa-opt.on { border-color: var(--chat-accent); background: color-mix(in srgb, var(--chat-accent) 9%, var(--surface)); }
+.qa-opt:disabled { cursor: default; opacity: .7; }
+.qa-num { flex: none; width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-size: 12px; font-weight: 600;
+          color: var(--muted); background: var(--surface); border: 1px solid var(--border); }
+.qa-opt.on .qa-num { color: #fff; background: var(--chat-accent); border-color: var(--chat-accent); }
+.qa-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.qa-text b { font-size: 13.5px; font-weight: 600; }
+.qa-text small { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+.qa-mark { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--border-strong); display: grid; place-items: center; color: #fff; }
+.qa-mark.box { border-radius: 5px; }
+.qa-opt.on .qa-mark { background: var(--chat-accent); border-color: var(--chat-accent); }
+.qa-mark svg { width: 11px; height: 11px; }
+.qa-other { height: 36px; border: 1px solid var(--border); border-radius: 10px; padding: 0 12px; background: var(--surface); outline: 0; font-size: 13.5px; }
+.qa-other:focus { border-color: var(--chat-accent); }
+.qa-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.qa-hint { font-size: 12px; color: var(--faint); }
+.qa.done { padding: 10px 14px; gap: 6px; background: var(--surface-2); box-shadow: none; }
+.qa.done .qa-q { font-size: 13px; font-weight: 500; color: var(--muted); }
+.qa-answer { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--text); }
+.qa-answer svg { width: 14px; height: 14px; color: var(--green); }
+.qa-answer.skipped { color: var(--faint); font-weight: 500; }

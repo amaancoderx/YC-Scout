@@ -1248,6 +1248,86 @@ async function openMemory() {
   openModal(paint(data), mount);
 }
 
+function openQuestion() {
+  const msgs = state.agent.messages;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m.role !== "bot") continue;
+    const q = (m.blocks || []).slice().reverse().find((b) => b.kind === "question");
+    return q && !("answer" in q) ? q : null;
+  }
+  return null;
+}
+
+function questionHtml(b, live) {
+  if ("answer" in b) {
+    return `<div class="qa done"><div class="qa-q">${esc(b.question)}</div>
+      ${b.answer ? `<div class="qa-answer">${icon("check")}<span>${esc(b.answer)}</span></div>` : '<div class="qa-answer skipped">Skipped</div>'}</div>`;
+  }
+  const sel = b._sel || [];
+  const other = b._other || "";
+  const ready = sel.length > 0 || other.trim();
+  return `<div class="qa ${live ? "live" : ""}" data-qa="${esc(b.id)}">
+    <div class="qa-q">${esc(b.question)}</div>
+    <div class="qa-opts">${b.options.map((o, i) => `
+      <button type="button" class="qa-opt ${sel.includes(i) ? "on" : ""} ${b.purpose === "send" && i === 0 ? "primary" : ""}" data-qopt="${i}" ${live ? "" : "disabled"}>
+        <span class="qa-num">${i + 1}</span>
+        <span class="qa-text"><b>${esc(o.label)}</b>${o.description ? `<small>${esc(o.description)}</small>` : ""}</span>
+        <span class="qa-mark ${b.multi ? "box" : ""}">${sel.includes(i) ? icon("check") : ""}</span>
+      </button>`).join("")}
+    </div>
+    ${b.allow_other ? `<input class="qa-other" data-qother placeholder="Something else…" value="${esc(other)}" ${live ? "" : "disabled"}>` : ""}
+    <div class="qa-foot"><span class="qa-hint">${b.multi ? "Select all that apply" : "Select one"}${live ? " · press 1-" + b.options.length : ""}</span>
+      <button type="button" class="btn btn-primary btn-sm qa-submit" data-qsubmit ${live && ready ? "" : "disabled"}>${b.purpose === "send" ? icon("send") : ""}Submit</button></div>
+  </div>`;
+}
+
+function bindQuestion(col) {
+  const card = $(".qa.live", col);
+  const b = openQuestion();
+  if (!card || !b) return;
+  const repaint = () => { card.outerHTML = questionHtml(b, true); bindQuestion($("#cx-col")); };
+  $$("[data-qopt]", card).forEach((el) => (el.onclick = () => {
+    const i = +el.dataset.qopt;
+    b._sel = b.multi ? ((b._sel || []).includes(i) ? b._sel.filter((x) => x !== i) : [...(b._sel || []), i]) : [i];
+    if (!b.multi && !b.allow_other) return submitQuestion(b);
+    if (!b.multi) b._other = "";
+    repaint();
+  }));
+  const other = $("[data-qother]", card);
+  if (other) other.oninput = () => {
+    b._other = other.value;
+    if (!b.multi && other.value.trim()) b._sel = [];
+    const btn = $("[data-qsubmit]", card);
+    btn.disabled = !((b._sel || []).length || other.value.trim());
+    $$("[data-qopt]", card).forEach((el) => el.classList.toggle("on", (b._sel || []).includes(+el.dataset.qopt)));
+  };
+  if (other) other.onkeydown = (e) => { if (e.key === "Enter" && other.value.trim()) { e.preventDefault(); submitQuestion(b); } };
+  $("[data-qsubmit]", card).onclick = () => submitQuestion(b);
+}
+
+function submitQuestion(b) {
+  if (state.agent.streaming) return;
+  const picked = (b._sel || []).map((i) => b.options[i].label);
+  if (b._other && b._other.trim()) picked.push(b._other.trim());
+  if (!picked.length) return;
+  const text = picked.join(", ");
+  b.answer = text;
+  sendAgent(text, { question_id: b.id });
+}
+
+document.addEventListener("keydown", (e) => {
+  if (location.hash !== "#/agent" || state.agent.streaming) return;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "") && document.activeElement.value) return;
+  const b = openQuestion();
+  if (!b || !/^[1-4]$/.test(e.key)) return;
+  const i = +e.key - 1;
+  if (i >= b.options.length) return;
+  e.preventDefault();
+  const el = $(`.qa.live [data-qopt="${i}"]`);
+  el && el.click();
+});
+
 function setSendState() {
   const a = state.agent, send = $("#cx-send");
   if (!send) return;
@@ -1271,6 +1351,8 @@ function renderBlock(b, i, m) {
       ${open ? `<div class="cx-think-body">${md(b.text)}</div>` : ""}
     </div>`;
   }
+  if (b.kind === "question") return questionHtml(b, !m.streaming && openQuestion() === b);
+  if (b.kind === "tool" && b.name === "ask_user") return "";
   if (b.kind === "tool") {
     const st = !b.done ? "run" : b.ok ? "ok" : "err";
     const ic = st === "run" ? '<span class="spin"></span>' : st === "ok" ? icon("check") : icon("close");
@@ -1282,7 +1364,8 @@ function renderBlock(b, i, m) {
 
 function botHtml(m, idx) {
   const blocks = m.blocks || [];
-  const busy = m.streaming && (!blocks.length || (blocks[blocks.length - 1].kind === "tool" && blocks[blocks.length - 1].done));
+  const lastB = blocks[blocks.length - 1];
+  const busy = m.streaming && (!blocks.length || (lastB.kind === "tool" && lastB.done)) && !(lastB && lastB.kind === "question");
   const textOut = blocks.filter((b) => b.kind === "text").map((b) => b.text).join("\n\n").trim();
   const drafted = blocks.some((b) => b.kind === "tool" && b.name === "draft_emails" && b.ok);
   const foot = !m.streaming ? `<div class="cx-actions">
@@ -1321,6 +1404,7 @@ function paintChat(full = false) {
 
 function bindChat(col) {
   const a = state.agent;
+  bindQuestion(col);
   $$("[data-think]", col).forEach((b) => (b.onclick = () => {
     const m = a.messages[+b.closest("[data-msg]").dataset.msg];
     const blk = m.blocks[+b.dataset.think];
@@ -1341,9 +1425,11 @@ function schedulePaint() {
   requestAnimationFrame(() => { paintQueued = false; paintChat(); });
 }
 
-async function sendAgent(text) {
+async function sendAgent(text, answer = null) {
   const a = state.agent;
   if (a.streaming) return;
+  const open = openQuestion();
+  if (open && !answer) open.answer = null;
   const m = { role: "bot", blocks: [], streaming: true };
   a.messages.push({ role: "user", text }, m);
   a.streaming = true;
@@ -1375,6 +1461,7 @@ async function sendAgent(text) {
       if (t) Object.assign(t, { done: true, ok: ev.ok, summary: ev.summary });
     } else if (ev.type === "runs") { m.runs = ev.runs; pollStatus(); }
     else if (ev.type === "confirm") { m.confirm = ev; }
+    else if (ev.type === "question") { closeThinking(); m.blocks.push({ kind: "question", ...ev }); }
     else if (ev.type === "error") { m.error = ev.message; }
     else if (ev.type === "done") { if (ev.changed) pollStatus(); if (ev.memory_changed) refreshMemoryCount(); }
     schedulePaint();
@@ -1382,7 +1469,7 @@ async function sendAgent(text) {
   try {
     const res = await fetch("/api/agent/stream", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: a.session, message: text }), signal: a.ctrl.signal,
+      body: JSON.stringify({ session_id: a.session, message: text, answer }), signal: a.ctrl.signal,
     });
     if (!res.ok) {
       let detail = `Request failed (${res.status})`;
@@ -1410,7 +1497,7 @@ async function sendAgent(text) {
   } finally {
     closeThinking();
     for (const b of m.blocks) if (b.kind === "tool" && !b.done) Object.assign(b, { done: true, ok: false, summary: "stopped" });
-    if (!m.blocks.some((b) => b.kind === "text") && !m.error && !m.stopped) m.blocks.push({ kind: "text", text: "Done." });
+    if (!m.blocks.some((b) => b.kind === "text" || b.kind === "question") && !m.error && !m.stopped) m.blocks.push({ kind: "text", text: "Done." });
     m.streaming = false;
     a.streaming = false;
     a.ctrl = null;

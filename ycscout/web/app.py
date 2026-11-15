@@ -538,7 +538,8 @@ def agent_stream(payload: dict = Body(...)):
         raise HTTPException(400, "The agent needs GEMINI_API_KEY in .env")
 
     def events():
-        for ev in agent.chat_stream(payload.get("session_id"), message):
+        answer = payload.get("answer") if isinstance(payload.get("answer"), dict) else None
+        for ev in agent.chat_stream(payload.get("session_id"), message, answer):
             yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream",

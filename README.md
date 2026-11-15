@@ -124,7 +124,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 
 | | | |
 |---|---|---|
-| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (10) |
+| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (11) |
 | [Enrichment](#enrichment) (6) | [AI Research](#ai-research) (5) | [Automation](#automation) (5) |
 | [Email Intelligence](#email-intelligence) (6) | [Outreach](#outreach) (7) | [Exports](#exports) (4) |
 | [Dashboard](#dashboard) (6) | [Command Line](#command-line) (7) | [Project Structure](#project-structure) (9) |
@@ -210,7 +210,8 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Knows you** - Gets your profile and goal, so it ranks and writes for your situation.
 - **Knows the whole dashboard** - A live snapshot (totals, batches, top fits, stages, outreach, running jobs, integrations, rules) comes with every message, and 20 tools cover the rest: companies, jobs, people, drafts it can read and edit, pipeline logs, settings and analytics.
 - **Operate everything by prompt** - Sync, refresh, research, draft, edit, approve, send, check replies, follow-ups, exports, Google Sheets, settings, do-not-contact and jobs, all from chat. 33 tools in total.
-- **Send guard** - Before sending, the Agent tells you how many emails are ready and waits. It sends only after you confirm in your next message or click Confirm and send, never in the same turn.
+- **Question cards** - When the Agent needs a decision it shows a clickable card with options, a free-text answer and Submit (keys 1-4 work too). Answered cards collapse to show your choice.
+- **Send guard** - Sending shows a "Send N emails now?" card. Only Yes, send (or an explicit typed yes in your next message) sends, never in the same turn, and never twice.
 - **Saved chats** - Every conversation is saved locally. Reopen and continue any chat, search, rename or delete one, or delete all.
 - **Memory** - Learns lasting facts and preferences across chats ("only remote roles open to India"). View, add or delete memories, turn memory off, or clear it all.
 - **Reuses what you have** - Checks the dashboard first and answers from it instead of syncing or researching data that is already there.
