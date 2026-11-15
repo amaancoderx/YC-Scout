@@ -62,6 +62,10 @@ Restart the app after editing `.env`.
 
 Prefer the terminal? Every step also runs from the CLI. See [Command Line](#command-line).
 
+#### Deploy online (free)
+
+Run it on Render's free plan with a login page, a Turso cloud database and Gmail API sending: see **[DEPLOY.md](DEPLOY.md)**. One click with the included `render.yaml` blueprint.
+
 
 ### Why YC Scout?
 

@@ -662,3 +662,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: var(--border-strong) tra
 .qa-answer { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 600; color: var(--text); }
 .qa-answer svg { width: 14px; height: 14px; color: var(--green); }
 .qa-answer.skipped { color: var(--faint); font-weight: 500; }
+
+.signout { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 6px; padding: 6px 8px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12.5px; cursor: pointer; }
+.signout:hover { background: var(--surface-hover); color: var(--text); }
+.signout svg { width: 14px; height: 14px; }

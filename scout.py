@@ -9,6 +9,8 @@
   python scout.py export                    Write an Excel workbook to data/exports
   python scout.py sheet                     Push everything to Google Sheets
   python scout.py replies                   Check the inbox for replies / bounces
+  python scout.py push-db                   Copy local data/ycscout.db into the Turso cloud database
+  python scout.py gmail-auth                Connect Gmail for sending over HTTPS (Gmail API)
 
 Sync is safe to schedule (Windows Task Scheduler / cron): it only re-scrapes
 companies older than 2 days and never sends email.
@@ -72,7 +74,26 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("export")
     sub.add_parser("sheet")
     sub.add_parser("replies")
+    sub.add_parser("push-db")
+    sub.add_parser("gmail-auth")
     args = p.parse_args(argv)
+
+    if args.cmd == "gmail-auth":
+        from ycscout import gmail_auth
+        token = gmail_auth.run()
+        print("Gmail connected. Saved GMAIL_REFRESH_TOKEN to .env.")
+        print("On Render, add it as an environment variable:")
+        print("GMAIL_REFRESH_TOKEN=" + token)
+        return 0
+    if args.cmd == "push-db":
+        if not db.remote():
+            print("Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env first (see DEPLOY.md).")
+            return 1
+        local = config.DATA_DIR / "ycscout.db"
+        print(f"Copying {local} to {config.TURSO_DATABASE_URL} ...")
+        counts = db.push_local_to_remote(local)
+        print("Done:", ", ".join(f"{k} {v}" for k, v in counts.items()))
+        return 0
     db.init()
 
     if args.cmd in (None, "serve"):

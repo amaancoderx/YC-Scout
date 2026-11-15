@@ -11,6 +11,7 @@ const fmt = (n) => (n ?? 0).toLocaleString();
 const plural = (n, one, many) => `${fmt(n)} ${n === 1 ? one : many || one + "s"}`;
 
 const ICONS = {
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   memory: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M12 5v13"/>',
   sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>',
@@ -58,6 +59,7 @@ async function api(path, opts = {}) {
   } catch (e) {
     throw new Error("Can't reach the YC Scout server. Is it still running?");
   }
+  if (res.status === 401) { location.href = "/login"; throw new Error("Signed out"); }
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = text; }
@@ -242,6 +244,8 @@ async function pollStatus() {
     $("#integrations").innerHTML = Object.entries(s.integrations).map(([k, v]) =>
       `<a class="integration" href="#/settings" title="${esc(v.detail)}"><span class="dot ${v.ok ? "on" : "off"}"></span><b>${names[k]}</b><span class="grow"></span>${v.ok ? "" : '<span class="faint">off</span>'}</a>`).join("");
     $("#badge-pipeline").hidden = !s.active_runs.length;
+    const out = $("#signout");
+    if (out) { out.hidden = !s.auth?.enabled; out.title = s.auth?.email ? `Signed in as ${s.auth.email}` : ""; }
     const counts = await api("/api/outreach?status=draft&limit=1");
     const d = counts.counts.draft || 0;
     $("#badge-outreach").hidden = !d;
@@ -1471,6 +1475,7 @@ async function sendAgent(text, answer = null) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: a.session, message: text, answer }), signal: a.ctrl.signal,
     });
+    if (res.status === 401) { location.href = "/login"; return; }
     if (!res.ok) {
       let detail = `Request failed (${res.status})`;
       try { detail = (await res.json()).detail || detail; } catch { /* keep default */ }
@@ -1608,6 +1613,8 @@ function mountThemeSwitch() {
   if (!host) return;
   const opts = [["system", "monitor", "System"], ["light", "sun", "Light"], ["dark", "moon", "Dark"]];
   host.innerHTML = opts.map(([v, ic, label]) => `<button type="button" data-theme-set="${v}" title="${label}" aria-label="${label} theme">${icon(ic)}</button>`).join("");
+  host.insertAdjacentHTML("afterend", `<button type="button" class="signout" id="signout" hidden>${icon("logout")}<span>Sign out</span></button>`);
+  $("#signout").onclick = async () => { try { await fetch("/api/logout", { method: "POST" }); } catch { /* ignore */ } location.href = "/login"; };
   $$("[data-theme-set]", host).forEach((b) => (b.onclick = () => setTheme(b.dataset.themeSet)));
   applyTheme(getTheme());
 }

@@ -10,3 +10,4 @@ gspread>=5.12
 google-auth>=2.30
 python-dotenv>=1.0
 truststore>=0.9
+libsql>=0.1.11

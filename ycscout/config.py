@@ -36,6 +36,9 @@ def _env_int(name: str, default: int) -> int:
 DATA_DIR = Path(_env("YCSCOUT_DATA_DIR", str(ROOT / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "ycscout.db"
+# Cloud database (Turso / libSQL). When set, it is used instead of the local file.
+TURSO_DATABASE_URL = _env("TURSO_DATABASE_URL")
+TURSO_AUTH_TOKEN = _env("TURSO_AUTH_TOKEN")
 EXPORT_DIR = DATA_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -56,18 +59,34 @@ SMTP_USER = _env("SMTP_USER")
 SMTP_PASSWORD = _env("SMTP_PASSWORD")
 FROM_EMAIL = _env("FROM_EMAIL") or SMTP_USER
 FROM_NAME = _env("FROM_NAME")
+# Gmail API (HTTPS) for sending; get the refresh token with: python scout.py gmail-auth
+GMAIL_CLIENT_ID = _env("GMAIL_CLIENT_ID")
+GMAIL_CLIENT_SECRET = _env("GMAIL_CLIENT_SECRET")
+GMAIL_REFRESH_TOKEN = _env("GMAIL_REFRESH_TOKEN")
 IMAP_HOST = _env("IMAP_HOST", "imap.gmail.com")
 IMAP_PORT = _env_int("IMAP_PORT", 993)
 
 # --- Google Sheets ------------------------------------------------------------
 GOOGLE_SERVICE_ACCOUNT_FILE = _env("GOOGLE_SERVICE_ACCOUNT_FILE")
+# Hosted: paste the whole service-account JSON into GOOGLE_SERVICE_ACCOUNT_JSON instead of a file.
+if _env("GOOGLE_SERVICE_ACCOUNT_JSON"):
+    _key_path = DATA_DIR / "google-key.json"
+    _key_path.write_text(_env("GOOGLE_SERVICE_ACCOUNT_JSON"), encoding="utf-8")
+    GOOGLE_SERVICE_ACCOUNT_FILE = str(_key_path)
 if GOOGLE_SERVICE_ACCOUNT_FILE and not Path(GOOGLE_SERVICE_ACCOUNT_FILE).is_absolute():
     GOOGLE_SERVICE_ACCOUNT_FILE = str(ROOT / GOOGLE_SERVICE_ACCOUNT_FILE)
 GOOGLE_SHEET_ID = _env("GOOGLE_SHEET_ID")
 
 # --- Web server ---------------------------------------------------------------
-HOST = _env("YCSCOUT_HOST", "127.0.0.1")
-PORT = _env_int("YCSCOUT_PORT", 8000)
+ON_RENDER = bool(os.environ.get("RENDER"))
+HOST = _env("YCSCOUT_HOST", "0.0.0.0" if ON_RENDER else "127.0.0.1")
+PORT = _env_int("PORT", _env_int("YCSCOUT_PORT", 8000))  # Render passes PORT
+PUBLIC_URL = (_env("PUBLIC_URL") or _env("RENDER_EXTERNAL_URL") or "").rstrip("/")
+
+# --- Login (on when APP_PASSWORD is set; always set it when hosting) -----------
+APP_EMAIL = _env("APP_EMAIL", "amaan.coderx@gmail.com")
+APP_PASSWORD = _env("APP_PASSWORD")
+SECRET_KEY = _env("SECRET_KEY")
 
 # --- Scraping -----------------------------------------------------------------
 USER_AGENT = (
@@ -86,8 +105,14 @@ def ai_enabled() -> bool:
     return bool(GEMINI_API_KEY)
 
 
+def gmail_api_enabled() -> bool:
+    """Send through the Gmail API over HTTPS (works where SMTP ports are blocked, e.g. Render Free)."""
+    return bool(GMAIL_CLIENT_ID and GMAIL_CLIENT_SECRET and GMAIL_REFRESH_TOKEN and FROM_EMAIL)
+
+
 def smtp_enabled() -> bool:
-    return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and FROM_EMAIL)
+    """True when email can be sent: Gmail API, or SMTP credentials."""
+    return gmail_api_enabled() or bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD and FROM_EMAIL)
 
 
 def imap_enabled() -> bool:

@@ -1,4 +1,4 @@
-"""SQLite storage. One file, WAL mode, safe for the web server + background jobs."""
+"""Storage: a local SQLite file (WAL mode), or a Turso cloud database when TURSO_DATABASE_URL is set."""
 from __future__ import annotations
 
 import json
@@ -249,7 +249,111 @@ def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _connect() -> sqlite3.Connection:
+# ---------------------------------------------------------------------------
+# Connections: a local SQLite file, or a Turso (libSQL) cloud database when
+# TURSO_DATABASE_URL is set (used on Render, whose disk is wiped on restart).
+# Both expose the same sqlite3-style API to the rest of the app.
+# ---------------------------------------------------------------------------
+class _Row(tuple):
+    """Row usable as row[0], row["name"] and dict(row), like sqlite3.Row."""
+
+    _names: tuple = ()
+
+    def __new__(cls, values, names):
+        r = super().__new__(cls, values)
+        r._names = names
+        return r
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return tuple.__getitem__(self, self._names.index(key))
+        return tuple.__getitem__(self, key)
+
+    def keys(self):
+        return list(self._names)
+
+
+class _Cursor:
+    def __init__(self, cur):
+        self._cur = cur
+        self._names = tuple(d[0] for d in (cur.description or ()))
+
+    def fetchall(self):
+        return [_Row(r, self._names) for r in self._cur.fetchall()]
+
+    def fetchone(self):
+        r = self._cur.fetchone()
+        return None if r is None else _Row(r, self._names)
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+    @property
+    def lastrowid(self):
+        return self._cur.lastrowid
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def description(self):
+        return self._cur.description
+
+
+class _RemoteConn:
+    """Thin wrapper over a libsql connection; one per thread, reused."""
+
+    def __init__(self, raw):
+        self._c = raw
+
+    def execute(self, sql, params=()):
+        return _Cursor(self._c.execute(sql, tuple(params)))
+
+    def executemany(self, sql, seq):
+        for params in seq:
+            self._c.execute(sql, tuple(params))
+
+    def executescript(self, script):
+        self._c.executescript(script)
+
+    def commit(self):
+        self._c.commit()
+
+    def rollback(self):
+        try:
+            self._c.rollback()
+        except Exception:
+            pass
+
+    def close(self):  # kept open and reused by the thread
+        pass
+
+
+_local = threading.local()
+
+
+def remote() -> bool:
+    return bool(config.TURSO_DATABASE_URL)
+
+
+def _remote_conn() -> _RemoteConn:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        import libsql  # only needed in the cloud
+
+        conn = _RemoteConn(libsql.connect(config.TURSO_DATABASE_URL, auth_token=config.TURSO_AUTH_TOKEN))
+        _local.conn = conn
+    return conn
+
+
+def _drop_remote_conn() -> None:
+    _local.conn = None
+
+
+def _connect():
+    if remote():
+        return _remote_conn()
     conn = sqlite3.connect(config.DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -268,6 +372,8 @@ def tx():
             conn.commit()
         except Exception:
             conn.rollback()
+            if remote():
+                _drop_remote_conn()  # a broken stream is not reused
             raise
         finally:
             conn.close()
@@ -277,6 +383,10 @@ def query(sql: str, params: Iterable[Any] = ()) -> list[dict]:
     conn = _connect()
     try:
         return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
+    except Exception:
+        if remote():
+            _drop_remote_conn()
+        raise
     finally:
         conn.close()
 
@@ -372,3 +482,43 @@ def suppress(email: str, reason: str) -> None:
         "INSERT OR IGNORE INTO suppression(email, reason, created_at) VALUES (?, ?, ?)",
         (email.lower(), reason, now()),
     )
+
+
+# ---------------------------------------------------------------------------
+# Copy data between the local file and the cloud database
+# ---------------------------------------------------------------------------
+TABLE_ORDER = ["companies", "founders", "contacts", "jobs", "news", "outreach", "suppression",
+               "runs", "settings", "chats", "memories"]
+
+
+def push_local_to_remote(local_path, log=print) -> dict:
+    """Replace the cloud database contents with the local SQLite file (schema is created first)."""
+    if not remote():
+        raise RuntimeError("Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN first.")
+    init()
+    src = sqlite3.connect(str(local_path))
+    src.row_factory = sqlite3.Row
+    counts = {}
+    try:
+        with tx() as conn:
+            for table in reversed(TABLE_ORDER):
+                conn.execute(f"DELETE FROM {table}")
+        for table in TABLE_ORDER:
+            local_cols = [r[1] for r in src.execute(f"PRAGMA table_info({table})")]
+            remote_cols = {r[1] for r in _connect().execute(f"PRAGMA table_info({table})").fetchall()}
+            cols = [c for c in local_cols if c in remote_cols]
+            if not cols:
+                continue
+            rows = src.execute(f"SELECT {', '.join(cols)} FROM {table}").fetchall()
+            per = max(1, 800 // len(cols))  # stay under SQLite's bound-parameter limit
+            with tx() as conn:
+                for i in range(0, len(rows), per):
+                    chunk = rows[i:i + per]
+                    marks = ", ".join("(" + ", ".join("?" * len(cols)) + ")" for _ in chunk)
+                    params = [v for r in chunk for v in tuple(r)]
+                    conn.execute(f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES {marks}", params)
+            counts[table] = len(rows)
+            log(f"  {table}: {len(rows)} rows")
+    finally:
+        src.close()
+    return counts

@@ -325,7 +325,41 @@ def _build(row: dict) -> EmailMessage:
     return msg
 
 
-def _smtp() -> smtplib.SMTP:
+class GmailApiError(OSError):
+    """A Gmail API send failed (treated like a network/SMTP error)."""
+
+
+class _GmailApi:
+    """Drop-in for smtplib.SMTP: send_message() via the Gmail API over HTTPS."""
+
+    TOKEN_URL = "https://oauth2.googleapis.com/token"
+    SEND_URL = "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+
+    def __init__(self):
+        import httpx
+        self._http = httpx.Client(timeout=30)
+        r = self._http.post(self.TOKEN_URL, data={
+            "client_id": config.GMAIL_CLIENT_ID, "client_secret": config.GMAIL_CLIENT_SECRET,
+            "refresh_token": config.GMAIL_REFRESH_TOKEN, "grant_type": "refresh_token"})
+        if r.status_code != 200:
+            raise GmailApiError(f"Gmail sign-in failed ({r.status_code}): {r.text[:200]}. Run 'python scout.py gmail-auth' again.")
+        self._token = r.json()["access_token"]
+
+    def send_message(self, msg) -> dict:
+        import base64
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        r = self._http.post(self.SEND_URL, json={"raw": raw}, headers={"Authorization": f"Bearer {self._token}"})
+        if r.status_code >= 300:
+            raise GmailApiError(f"Gmail API error {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def quit(self):
+        self._http.close()
+
+
+def _smtp():
+    if config.gmail_api_enabled():
+        return _GmailApi()
     ctx = ssl.create_default_context()
     if config.SMTP_PORT == 465:
         server: smtplib.SMTP = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, context=ctx, timeout=30)
@@ -343,6 +377,8 @@ def test_smtp() -> str:
         raise RuntimeError("SMTP is not configured in .env")
     server = _smtp()
     server.quit()
+    if config.gmail_api_enabled():
+        return f"Gmail API ready, sending as {config.FROM_EMAIL}"
     return f"Logged in to {config.SMTP_HOST} as {config.SMTP_USER}"
 
 

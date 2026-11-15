@@ -7,16 +7,38 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .. import __version__, ai, agent, config, db, export, fit, jobs, outreach, pipeline, scheduler
 from ..sources import yc
+from . import auth
 
 STATIC = Path(__file__).parent / "static"
 app = FastAPI(title="YC Scout", version=__version__, docs_url="/api/docs")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.middleware("http")(auth.middleware)
+
+
+@app.get("/login")
+def login_page(request: Request):
+    return auth.login_page(request)
+
+
+@app.post("/api/login")
+def login(request: Request, payload: dict = Body(...)):
+    return auth.login(request, payload)
+
+
+@app.post("/api/logout")
+def logout():
+    return auth.logout()
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
 
 STAGES = ["new", "qualified", "contacted", "replied", "meeting", "won", "lost", "skip"]
 _batch_cache: dict[str, Any] = {"at": 0, "data": None}
@@ -54,7 +76,7 @@ def status():
         "integrations": {
             "ai": {"ok": config.ai_enabled(), "detail": ai.model_label() if config.ai_enabled() else "Add GEMINI_API_KEY to .env",
                    "model": ai.model_label() if config.ai_enabled() else None},
-            "smtp": {"ok": config.smtp_enabled(), "detail": f"{config.FROM_EMAIL} via {config.SMTP_HOST}" if config.smtp_enabled() else "Add SMTP_USER / SMTP_PASSWORD to .env"},
+            "smtp": {"ok": config.smtp_enabled(), "detail": (f"{config.FROM_EMAIL} via Gmail API" if config.gmail_api_enabled() else f"{config.FROM_EMAIL} via {config.SMTP_HOST}") if config.smtp_enabled() else "Add SMTP_USER / SMTP_PASSWORD to .env"},
             "imap": {"ok": config.imap_enabled(), "detail": config.IMAP_HOST if config.imap_enabled() else "Uses the SMTP login"},
             "sheets": {"ok": config.sheets_enabled(), "detail": f"Sheet {config.GOOGLE_SHEET_ID[:10]}…" if config.sheets_enabled() else "Add GOOGLE_SERVICE_ACCOUNT_FILE / GOOGLE_SHEET_ID"},
         },
@@ -63,6 +85,7 @@ def status():
         "daily_limit": db.get_setting("daily_send_limit", 40),
         "active_runs": db.query("SELECT id, kind, label, progress, total FROM runs WHERE status='running' ORDER BY id DESC"),
         "sender_first_name": _first_name(),
+        "auth": {"enabled": auth.enabled(), "email": config.APP_EMAIL if auth.enabled() else None},
     }
 
 
