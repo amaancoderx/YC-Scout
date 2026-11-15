@@ -48,6 +48,7 @@ TOOLS = [
                 "industry": {"type": "string"},
                 "hiring_only": {"type": "boolean"},
                 "remote_jobs_only": {"type": "boolean", "description": "Only companies with at least one open remote role."},
+                "has_phone": {"type": "boolean", "description": "Only companies that publish a phone or WhatsApp number."},
                 "stage": {"type": "string", "enum": ["new", "qualified", "contacted", "replied", "meeting", "won", "lost", "skip"]},
                 "min_email_confidence": {"type": "string", "enum": ["verified", "inferred", "likely", "guess"]},
                 "max_team_size": {"type": "integer"},
@@ -167,6 +168,8 @@ def search_companies(args: dict) -> list[dict]:
         where.append("(c.is_hiring=1 OR EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1))")
     if args.get("remote_jobs_only"):
         where.append("EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1 AND lower(COALESCE(j.location,'')) LIKE '%remote%')")
+    if args.get("has_phone"):
+        where.append("(COALESCE(c.phones,'[]') NOT IN ('','[]') OR COALESCE(c.whatsapp,'[]') NOT IN ('','[]'))")
     if args.get("stage"):
         where.append("c.stage=?")
         params.append(args["stage"])
@@ -188,7 +191,7 @@ def search_companies(args: dict) -> list[dict]:
     limit = max(1, min(int(args.get("limit") or 25), 200))
     rows = db.query(
         f"""SELECT c.id, c.name, c.batch, c.one_liner, c.industry, c.team_size, c.stage, c.funding_total,
-               c.fit_score, c.fit_reasons,
+               c.fit_score, c.fit_reasons, c.phones, c.whatsapp,
                (SELECT COUNT(*) FROM jobs j WHERE j.company_id=c.id AND j.active=1) AS open_roles,
                (SELECT GROUP_CONCAT(j.title || ' [' || COALESCE(j.location,'') || ']', '; ') FROM jobs j WHERE j.company_id=c.id AND j.active=1) AS roles,
                (SELECT ct.email || ' (' || ct.confidence || ')' FROM contacts ct WHERE ct.company_id=c.id AND ct.is_primary=1
@@ -198,6 +201,8 @@ def search_companies(args: dict) -> list[dict]:
     )
     for r in rows:
         r["fit_reasons"] = db.loads(r.get("fit_reasons"), [])
+        r["phones"] = [p.get("number") for p in db.loads(r.get("phones"), []) if p.get("number")]
+        r["whatsapp"] = [w.get("number") or w.get("link") for w in db.loads(r.get("whatsapp"), [])]
     return rows
 
 

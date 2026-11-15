@@ -131,12 +131,13 @@ SORTS = {
 
 
 REMOTE_SQL = "lower(COALESCE(j.location,'')) LIKE '%remote%'"
+PHONE_SQL = "(COALESCE(c.phones,'[]') NOT IN ('','[]') OR COALESCE(c.whatsapp,'[]') NOT IN ('','[]'))"
 
 
 @app.get("/api/companies")
 def companies(
     q: str = "", batch: str = "", industry: str = "", stage: str = "", hiring: bool = False,
-    remote: bool = False, email: str = "", researched: bool = False, sort: str = "batch", dir: str = "desc",
+    remote: bool = False, phone: bool = False, email: str = "", researched: bool = False, sort: str = "batch", dir: str = "desc",
     page: int = 1, page_size: int = Query(50, le=500),
 ):
     where, params = ["1=1"], []
@@ -159,6 +160,8 @@ def companies(
         where.append("EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1)")
     if remote:
         where.append(f"EXISTS (SELECT 1 FROM jobs j WHERE j.company_id=c.id AND j.active=1 AND {REMOTE_SQL})")
+    if phone:
+        where.append(PHONE_SQL)
     if email == "verified":
         where.append("EXISTS (SELECT 1 FROM contacts ct WHERE ct.company_id=c.id AND ct.confidence IN ('verified','inferred'))")
     elif email == "any":
@@ -174,7 +177,7 @@ def companies(
     rows = db.query(
         f"""SELECT c.id, c.name, c.slug, c.batch, c.batch_slug, c.one_liner, c.website, c.location, c.team_size,
                    c.industry, c.logo_url, c.stage, c.priority, c.funding_total, c.funding_source, c.researched_at,
-                   c.fit_score, c.fit_reasons,
+                   c.fit_score, c.fit_reasons, c.phones, c.whatsapp,
                    (SELECT COUNT(*) FROM jobs j WHERE j.company_id=c.id AND j.active=1) AS open_roles,
                    (SELECT COUNT(*) FROM jobs j WHERE j.company_id=c.id AND j.active=1 AND {REMOTE_SQL}) AS remote_roles,
                    (SELECT GROUP_CONCAT(f.name, ', ') FROM founders f WHERE f.company_id=c.id AND f.is_active=1) AS founders,
@@ -195,8 +198,8 @@ def companies(
 
 @app.get("/api/companies/ids")
 def company_ids(q: str = "", batch: str = "", industry: str = "", stage: str = "", hiring: bool = False,
-                remote: bool = False, email: str = "", researched: bool = False):
-    res = companies(q=q, batch=batch, industry=industry, stage=stage, hiring=hiring, remote=remote, email=email,
+                remote: bool = False, phone: bool = False, email: str = "", researched: bool = False):
+    res = companies(q=q, batch=batch, industry=industry, stage=stage, hiring=hiring, remote=remote, phone=phone, email=email,
                     researched=researched, page=1, page_size=500)
     return [r["id"] for r in res["rows"]]
 

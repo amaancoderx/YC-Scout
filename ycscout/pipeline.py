@@ -79,6 +79,9 @@ def sync_batches(run: Run, batch_slugs: list[str], *, crawl: bool = True, resear
         f"{stats['emails']} emails · {stats['jobs']} open roles"
     )
     run.log(summary)
+    dupes = dedupe_all()
+    if any(dupes.values()):
+        run.log(f"Removed duplicates: {dupes['phones']} phone, {dupes['whatsapp']} WhatsApp, {dupes['jobs']} job postings")
     fit.rescore()
     _maybe_sync_sheet(run)
     return summary
@@ -234,9 +237,16 @@ def save_yc_page(cid: int, page: yc.CompanyPage) -> None:
                 (cid, *names),
             )
         conn.execute("UPDATE jobs SET active=0 WHERE company_id=?", (cid,))
+        seen_jobs: set[tuple] = set()
         for j in page.jobs:
             if not j.get("id"):
                 continue
+            # YC sometimes lists the same posting several times; keep one.
+            sig = tuple((j.get(k) or "").strip().lower() for k in
+                        ("title", "location", "type", "salary", "equity", "experience", "visa"))
+            if sig in seen_jobs:
+                continue
+            seen_jobs.add(sig)
             conn.execute(
                 """INSERT INTO jobs(id, company_id, title, url, apply_url, location, type, role, salary, equity,
                        experience, visa, posted, active, updated_at)
@@ -271,9 +281,9 @@ def save_crawl(cid: int, result: website.CrawlResult) -> None:
                        source_url, created_at) VALUES (?,?,?,?,?, 'verified', 'website', ?, ?)""",
                 (cid, fid, email, kind, label, url, ts),
             )
-        phones = _merge_list(db.loads(company.get("phones"), []), [
-            {"number": n, "source_url": u} for n, u in result.phones.items()], "number")
-        wa = _merge_list(db.loads(company.get("whatsapp"), []), list(result.whatsapp.values()), "link")
+        phones = merge_phones(db.loads(company.get("phones"), []), [
+            {"number": n, "source_url": u} for n, u in result.phones.items()])
+        wa = merge_whatsapp(db.loads(company.get("whatsapp"), []), list(result.whatsapp.values()))
         for kind in ("instagram", "youtube", "discord", "calendly"):
             if kind in result.socials:
                 other[kind] = result.socials[kind]
@@ -373,9 +383,9 @@ def research_one(cid: int) -> str:
     for p in data.get("phones") or []:
         num = "+" + re.sub(r"\D", "", p["number"]) if p["number"].strip().startswith("+") else re.sub(r"\D", "", p["number"])
         if p.get("is_whatsapp"):
-            wa = _merge_list(wa, [{"number": num, "link": f"https://wa.me/{num.lstrip('+')}", "source_url": p["source_url"]}], "number")
+            wa = merge_whatsapp(wa, [{"number": num, "link": f"https://wa.me/{num.lstrip('+')}", "source_url": p["source_url"]}])
         else:
-            phones = _merge_list(phones, [{"number": num, "source_url": p["source_url"]}], "number")
+            phones = merge_phones(phones, [{"number": num, "source_url": p["source_url"]}])
 
     with db.tx() as conn:
         conn.execute(
@@ -462,6 +472,50 @@ def make_summary(description: str | None, one_liner: str | None, max_chars: int 
     return out
 
 
+def phone_key(number: str | None) -> str:
+    """Same number with or without country code / 00 prefix -> same key."""
+    d = re.sub(r"\D", "", number or "")
+    if d.startswith("00"):
+        d = d[2:]
+    return d[-10:] if len(d) >= 10 else d
+
+
+def merge_phones(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Each number once; the international (+...) spelling wins."""
+    out: list[dict] = []
+    index: dict[str, int] = {}
+    for item in [*existing, *new]:
+        k = phone_key(item.get("number"))
+        if not k:
+            continue
+        if k in index:
+            cur = out[index[k]]
+            if not str(cur["number"]).startswith("+") and str(item["number"]).startswith("+"):
+                out[index[k]] = {**cur, "number": item["number"]}
+            continue
+        index[k] = len(out)
+        out.append(item)
+    return out
+
+
+def merge_whatsapp(existing: list[dict], new: list[dict]) -> list[dict]:
+    """WhatsApp entries keyed by number when known (wa.me/1… == wa.me/+1…), else by link."""
+    out: list[dict] = []
+    index: dict[str, int] = {}
+    for item in [*existing, *new]:
+        k = ("n:" + phone_key(item.get("number"))) if item.get("number") else ("l:" + str(item.get("link") or "").rstrip("/"))
+        if k in ("n:", "l:"):
+            continue
+        if k in index:
+            cur = out[index[k]]
+            if item.get("number") and str(item["number"]).startswith("+") and not str(cur.get("number") or "").startswith("+"):
+                out[index[k]] = {**cur, "number": item["number"]}
+            continue
+        index[k] = len(out)
+        out.append(item)
+    return out
+
+
 def _merge_list(existing: list[dict], new: list[dict], key: str) -> list[dict]:
     seen = {e.get(key) for e in existing}
     out = list(existing)
@@ -470,3 +524,27 @@ def _merge_list(existing: list[dict], new: list[dict], key: str) -> list[dict]:
             out.append(item)
             seen.add(item.get(key))
     return out
+
+
+def dedupe_all() -> dict:
+    """Safety net run after every sync: each phone, WhatsApp number and job posting once."""
+    fixed = {"phones": 0, "whatsapp": 0, "jobs": 0}
+    with db.tx() as conn:
+        for c in conn.execute("SELECT id, phones, whatsapp FROM companies").fetchall():
+            phones = db.loads(c["phones"], [])
+            wa = db.loads(c["whatsapp"], [])
+            p2, w2 = merge_phones([], phones), merge_whatsapp([], wa)
+            if len(p2) != len(phones) or len(w2) != len(wa):
+                fixed["phones"] += len(phones) - len(p2)
+                fixed["whatsapp"] += len(wa) - len(w2)
+                conn.execute("UPDATE companies SET phones=?, whatsapp=? WHERE id=?", (json.dumps(p2), json.dumps(w2), c["id"]))
+        seen: set[tuple] = set()
+        for j in conn.execute("SELECT * FROM jobs WHERE active=1 ORDER BY company_id, id").fetchall():
+            sig = (j["company_id"],) + tuple((j[k] or "").strip().lower() for k in
+                                             ("title", "location", "type", "salary", "equity", "experience", "visa"))
+            if sig in seen:
+                conn.execute("UPDATE jobs SET active=0 WHERE id=?", (j["id"],))
+                fixed["jobs"] += 1
+            else:
+                seen.add(sig)
+    return fixed

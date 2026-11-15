@@ -196,7 +196,7 @@ function confirmModal({ title, body, confirm = "Confirm", danger = false }) {
 // ---------------------------------------------------------------------------
 const state = {
   status: null,
-  companies: { q: "", batch: "", industry: "", stage: "", hiring: false, remote: false, email: "", researched: false, sort: "fit", dir: "desc", page: 1, selected: new Set(), data: null },
+  companies: { q: "", batch: "", industry: "", stage: "", hiring: false, remote: false, phone: false, email: "", researched: false, sort: "fit", dir: "desc", page: 1, selected: new Set(), data: null },
   outreach: { tab: "draft", activeId: null, selected: new Set(), data: null },
   agent: { session: null, messages: [] },
   runPoll: null,
@@ -357,6 +357,7 @@ async function renderCompanies(root) {
       </select>
       <span class="chip ${s.hiring ? "on" : ""}" id="f-hiring">Hiring</span>
       <span class="chip ${s.remote ? "on" : ""}" id="f-remote" title="Companies with at least one open remote role">Remote jobs</span>
+      <span class="chip ${s.phone ? "on" : ""}" id="f-phone" title="Companies that publish a phone or WhatsApp number">Has phone</span>
       <span class="chip ${s.researched ? "on" : ""}" id="f-researched">AI researched</span>
       <span class="grow"></span>
       <span class="muted" id="result-count"></span>
@@ -374,6 +375,7 @@ async function renderCompanies(root) {
   bind("#f-batch", "batch"); bind("#f-industry", "industry"); bind("#f-stage", "stage"); bind("#f-email", "email");
   $("#f-hiring").onclick = (e) => { s.hiring = !s.hiring; e.currentTarget.classList.toggle("on", s.hiring); s.page = 1; loadCompanies(); };
   $("#f-remote").onclick = (e) => { s.remote = !s.remote; e.currentTarget.classList.toggle("on", s.remote); s.page = 1; loadCompanies(); };
+  $("#f-phone").onclick = (e) => { s.phone = !s.phone; e.currentTarget.classList.toggle("on", s.phone); s.page = 1; loadCompanies(); };
   $("#f-researched").onclick = (e) => { s.researched = !s.researched; e.currentTarget.classList.toggle("on", s.researched); s.page = 1; loadCompanies(); };
   $$("th[data-sort]", root).forEach((el) => (el.onclick = () => {
     const key = el.dataset.sort;
@@ -396,6 +398,7 @@ function companyQuery(extra = {}) {
   const p = new URLSearchParams({ q: s.q, batch: s.batch, industry: s.industry, stage: s.stage, email: s.email, sort: s.sort, dir: s.dir, page: s.page, page_size: 50, ...extra });
   if (s.hiring) p.set("hiring", "true");
   if (s.remote) p.set("remote", "true");
+  if (s.phone) p.set("phone", "true");
   if (s.researched) p.set("researched", "true");
   return p.toString();
 }
@@ -416,6 +419,23 @@ async function loadCompanies() {
   $("#next") && ($("#next").onclick = () => { s.page++; loadCompanies(); });
   paintBulk();
 }
+function phoneKey(n) {
+  let d = String(n || "").replace(/\D/g, "");
+  if (d.startsWith("00")) d = d.slice(2);
+  return d.length >= 10 ? d.slice(-10) : d;
+}
+function parseList(v) {
+  if (Array.isArray(v)) return v;
+  try { return JSON.parse(v || "[]") || []; } catch { return []; }
+}
+function phoneMark(c) {
+  const phones = parseList(c.phones).map((p) => p.number).filter(Boolean);
+  const wa = parseList(c.whatsapp);
+  if (!phones.length && !wa.length) return "";
+  const label = [...phones, ...wa.map((w) => (w.number ? w.number + " (WhatsApp)" : "WhatsApp link"))];
+  const unique = [...new Map(label.map((x) => [phoneKey(x) || x, x])).values()];
+  return ` <span class="phone-mark ${wa.length ? "wa" : ""}" title="${esc(unique.join(" · "))}">${icon("phone")}</span>`;
+}
 function fitBadge(score, reasons) {
   if (score == null) return '<span class="faint">-</span>';
   let list = reasons;
@@ -435,7 +455,7 @@ function paintRows() {
   body.innerHTML = rows.map((c) => `
     <tr data-id="${c.id}" class="${s.selected.has(c.id) ? "selected" : ""}">
       <td class="cb"><input type="checkbox" class="check" data-cb="${c.id}" ${s.selected.has(c.id) ? "checked" : ""}></td>
-      <td><div class="co">${logo(c.logo_url, c.name)}<div style="min-width:0"><div class="co-name">${esc(c.name)}${c.priority ? ' <span class="badge b-accent">Priority</span>' : ""}</div><div class="co-line">${esc(c.one_liner)}</div></div></div></td>
+      <td><div class="co">${logo(c.logo_url, c.name)}<div style="min-width:0"><div class="co-name">${esc(c.name)}${phoneMark(c)}${c.priority ? ' <span class="badge b-accent">Priority</span>' : ""}</div><div class="co-line">${esc(c.one_liner)}</div></div></div></td>
       <td>${fitBadge(c.fit_score, c.fit_reasons)}</td>
       <td class="nowrap">${esc(shortBatch(c.batch))}</td>
       <td><div class="ellipsis" style="max-width:170px" title="${esc(c.founders || "")}">${esc(c.founders || "-")}</div></td>
@@ -496,7 +516,7 @@ function paintBulk() {
 
 async function exportFiltered(kind) {
   const ids = await api(`/api/companies/ids?${companyQuery()}`);
-  const filtered = state.companies.q || state.companies.batch || state.companies.industry || state.companies.stage || state.companies.email || state.companies.hiring || state.companies.remote || state.companies.researched;
+  const filtered = state.companies.q || state.companies.batch || state.companies.industry || state.companies.stage || state.companies.email || state.companies.hiring || state.companies.remote || state.companies.phone || state.companies.researched;
   const idParam = filtered ? `ids=${ids.join(",")}` : "";
   location.href = kind === "xlsx" ? `/api/export.xlsx?${idParam}` : `/api/export.csv?${idParam}`;
 }
@@ -657,8 +677,8 @@ function paintCompany(c) {
       <div class="section"><h4>Company contact</h4>
         <div class="email-list">${companyEmails.map(emailRow).join("") || '<span class="faint">No company inbox published on the website.</span>'}</div>
         ${(c.phones || []).length || (c.whatsapp || []).length ? `<div class="email-list" style="margin-top:8px">
-          ${(c.whatsapp || []).map((w) => `<div class="email-row">${icon("phone")}<span class="mono grow">${esc(w.number || w.link)}</span><span class="badge b-green">WhatsApp</span><a class="btn btn-sm" href="${esc(w.number ? "https://wa.me/" + w.number.replace(/\D/g, "") : w.link)}" target="_blank" rel="noopener">Open chat</a>${w.source_url ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(w.source_url)}" target="_blank" title="Source">${icon("external")}</a>` : ""}</div>`).join("")}
-          ${(c.phones || []).map((p) => `<div class="email-row">${icon("phone")}<span class="mono grow">${esc(p.number)}</span><a class="btn btn-sm" href="https://wa.me/${esc(p.number.replace(/\D/g, ""))}" target="_blank" rel="noopener" title="Try this number on WhatsApp">WhatsApp</a><a class="btn btn-sm" href="tel:${esc(p.number)}">Call</a>${p.source_url ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(p.source_url)}" target="_blank" title="Source">${icon("external")}</a>` : ""}</div>`).join("")}
+          ${(c.whatsapp || []).filter((w) => !w.number || !(c.phones || []).some((p) => phoneKey(p.number) === phoneKey(w.number))).map((w) => `<div class="email-row">${icon("phone")}<span class="mono grow">${esc(w.number || w.link)}</span><span class="badge b-green">WhatsApp</span><a class="btn btn-sm" href="${esc(w.number ? "https://wa.me/" + w.number.replace(/\D/g, "") : w.link)}" target="_blank" rel="noopener">Open chat</a>${w.source_url ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(w.source_url)}" target="_blank" title="Source">${icon("external")}</a>` : ""}</div>`).join("")}
+          ${(c.phones || []).map((p) => `<div class="email-row">${icon("phone")}<span class="mono grow">${esc(p.number)}</span>${(c.whatsapp || []).some((w) => w.number && phoneKey(w.number) === phoneKey(p.number)) ? '<span class="badge b-green">WhatsApp</span>' : ""}<a class="btn btn-sm" href="https://wa.me/${esc(p.number.replace(/\D/g, ""))}" target="_blank" rel="noopener" title="Try this number on WhatsApp">WhatsApp</a><a class="btn btn-sm" href="tel:${esc(p.number)}">Call</a>${p.source_url ? `<a class="btn btn-ghost btn-sm btn-icon" href="${esc(p.source_url)}" target="_blank" title="Source">${icon("external")}</a>` : ""}</div>`).join("")}
         </div>` : '<p class="faint" style="margin:8px 0 0">No phone or WhatsApp number is published.</p>'}
         <form class="row" id="add-email" style="margin-top:10px">
           <input class="input grow mono" name="email" placeholder="Add an email you know" autocomplete="off">

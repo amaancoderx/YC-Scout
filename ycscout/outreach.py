@@ -234,6 +234,7 @@ def create_drafts(company_ids: list[int], *, mode: str = "ai", target: str = "ce
             run.log("No GEMINI_API_KEY, using your email template instead of AI drafting.")
     settings = db.all_settings()
     made = skipped = failed = 0
+    company_ids = list(dict.fromkeys(int(c) for c in company_ids))  # each company once
     if run:
         run.set_total(len(company_ids))
     for cid in company_ids:
@@ -244,12 +245,30 @@ def create_drafts(company_ids: list[int], *, mode: str = "ai", target: str = "ce
             continue
         rcpts = recipients(cid, target)
         if not rcpts and run:
-            run.log(f"  – {company['name']}: no usable email")
+            run.log(f"  - {company['name']}: no usable email")
+        # One first email per company (CEO / inbox) or per founder (all founders), never two.
+        active = db.query(
+            "SELECT lower(to_email) AS email, founder_id FROM outreach WHERE company_id=? AND step=1 "
+            "AND status NOT IN ('cancelled','failed')", (cid,))
+        if target in ("ceo", "inbox") and active:
+            skipped += len(rcpts) or 1
+            if run:
+                run.log(f"  - {company['name']}: already has a first email ({active[0]['email']}), skipped")
+            if run:
+                run.advance()
+            continue
+        contacted_founders = {a["founder_id"] for a in active if a["founder_id"]}
+        seen_emails = {a["email"] for a in active}
         for r in rcpts:
-            if db.is_suppressed(r["email"]) or db.one(
-                    "SELECT 1 FROM outreach WHERE to_email=? AND step=1 AND status NOT IN ('cancelled','failed')", (r["email"],)):
+            email_l = r["email"].lower()
+            if (db.is_suppressed(r["email"]) or email_l in seen_emails
+                    or (r["founder_id"] and r["founder_id"] in contacted_founders)
+                    or (not r["founder_id"] and active)
+                    or db.one("SELECT 1 FROM outreach WHERE lower(to_email)=? AND step=1 "
+                              "AND status NOT IN ('cancelled','failed')", (email_l,))):
                 skipped += 1
                 continue
+            seen_emails.add(email_l)
             try:
                 if mode == "ai":
                     subject, body = ai_draft(company, r, instructions)

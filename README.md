@@ -124,7 +124,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 
 | | | |
 |---|---|---|
-| [Sourcing](#sourcing) (5) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (6) |
+| [Sourcing](#sourcing) (6) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (6) |
 | [Enrichment](#enrichment) (6) | [AI Research](#ai-research) (5) | [Automation](#automation) (5) |
 | [Email Intelligence](#email-intelligence) (6) | [Outreach](#outreach) (7) | [Exports](#exports) (4) |
 | [Dashboard](#dashboard) (6) | [Command Line](#command-line) (7) | [Project Structure](#project-structure) (9) |
@@ -136,6 +136,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Company pages** - Founders, bios, LinkedIn and X, launch posts, news and socials read from each ycombinator.com company page.
 - **Job board** - Every open role with salary, equity, experience, visa and remote location, refreshed on each sync.
 - **Incremental sync** - Re-running updates existing companies, adds new ones and closes filled jobs. Notes, stages and outreach stay untouched.
+- **No duplicates** - Every company, founder, email, job posting, phone number and news item is stored once. Repeated YC job listings and the same number with or without a country code are merged.
 - **Batch picker** - Sync any mix of batches, including early admits for upcoming ones.
 
 </details>
@@ -190,7 +191,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 <summary><h3 style="display:inline">Outreach</h3></summary>
 
 - **Two drafting modes** - AI-personalized emails per founder, or your own template with variables like `{{hiring_line}}` and `{{proof_line}}`.
-- **Targets** - CEO only, all founders, or the company inbox. Already-contacted and opted-out addresses are skipped.
+- **Targets** - CEO only, all founders, or the company inbox. One first email per company (or per founder), so re-drafting never doubles up. Opted-out addresses are skipped.
 - **Review and approve** - Edit any draft, approve one by one or in bulk. Nothing sends without approval.
 - **Safe sending** - SMTP with a daily cap, a delay between emails, an opt-out footer and a List-Unsubscribe header.
 - **Reply tracking** - The inbox is checked hourly over IMAP; replies move the company to Replied and cancel follow-ups.
@@ -236,7 +237,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 <summary><h3 style="display:inline">Dashboard</h3></summary>
 
 - **Overview** - Coverage, hiring, batches, industries, roles and your outreach funnel.
-- **Companies** - Search, filters (batch, industry, stage, contact quality, hiring, remote jobs), fit sort and bulk actions.
+- **Companies** - Search, filters (batch, industry, stage, contact quality, hiring, remote jobs, has phone), fit sort, a phone icon on companies with a published number, and bulk actions.
 - **Company panel** - Why it fits you, founders with emails, company contacts, funding, jobs, news and outreach history.
 - **Outreach** - Drafts, approved, sent, replied and bounced tabs with an editor.
 - **Pipeline** - Sync options, live job logs and automation switches.

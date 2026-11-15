@@ -585,3 +585,7 @@ html { transition: background-color .2s; }
 .integrations { display: grid; gap: 6px; }
 .bulkbar .dd, .bulkbar .dd-btn { flex: none; max-width: none; }
 .bulkbar .count { white-space: nowrap; }
+
+.phone-mark { display: inline-grid; place-items: center; width: 18px; height: 18px; margin-left: 5px; border-radius: 5px; vertical-align: -3px; color: var(--blue); background: var(--blue-bg); border: 1px solid var(--blue-bd); }
+.phone-mark.wa { color: var(--green); background: var(--green-bg); border-color: var(--green-bd); }
+.phone-mark svg { width: 11px; height: 11px; }
