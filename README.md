@@ -124,7 +124,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 
 | | | |
 |---|---|---|
-| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (8) |
+| [Sourcing](#sourcing) (7) | [Fit Scoring](#fit-scoring) (5) | [Agent](#agent) (9) |
 | [Enrichment](#enrichment) (6) | [AI Research](#ai-research) (5) | [Automation](#automation) (5) |
 | [Email Intelligence](#email-intelligence) (6) | [Outreach](#outreach) (7) | [Exports](#exports) (4) |
 | [Dashboard](#dashboard) (6) | [Command Line](#command-line) (7) | [Project Structure](#project-structure) (9) |
@@ -208,6 +208,7 @@ YC Scout never presents a guess as a fact. Every email carries a confidence labe
 - **Real tools** - Searches, reads company profiles, updates stages, starts syncs and research, drafts and approves.
 - **Live thinking** - Streams Gemini's thought summaries, each tool step and the answer as it is written.
 - **Knows you** - Gets your profile and goal, so it ranks and writes for your situation.
+- **Knows the whole dashboard** - A live snapshot (totals, batches, top fits, stages, outreach, running jobs, integrations, rules) comes with every message, and 20 tools cover the rest: companies, jobs, people, drafts it can read and edit, pipeline logs, settings and analytics.
 - **Send guard** - Sending always shows a Confirm and send button. The Agent never sends by itself.
 - **Saved chats** - Every conversation is saved locally. Reopen and continue any chat, search, rename or delete one, or delete all.
 - **Memory** - Learns lasting facts and preferences across chats ("only remote roles open to India"). View, add or delete memories, turn memory off, or clear it all.

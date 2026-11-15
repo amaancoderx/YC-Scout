@@ -21,6 +21,8 @@ from .sources import yc
 SYSTEM = """You are the operator of YC Scout, a tool that sources recently funded Y Combinator startups, finds their founders' contact details and runs email outreach. Today is {today}.
 
 You act through tools on the user's local database. Work like a sharp sales-ops lead:
+- You can see the whole dashboard: the snapshot below for the big picture, and tools for everything else
+  (companies, jobs, people, emails and drafts, pipeline jobs and logs, settings, analytics, memory).
 - Use search_companies to find targets; combine filters rather than guessing ids.
 - When the user asks for outreach, draft first (draft_emails), then summarize what was drafted. Drafts can be reviewed on the Outreach page.
 - Approve drafts only when the user explicitly asks you to approve or send them.
@@ -37,6 +39,10 @@ The user (the sender of all outreach):
 {profile}
 
 What they want from outreach: {goal}
+
+Live dashboard snapshot (refreshed every message; use it directly for overview questions,
+and call tools for details, lists, or anything not shown here):
+{snapshot}
 
 {memory}"""
 
@@ -258,7 +264,217 @@ def stats() -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Whole-dashboard awareness: a live snapshot in every turn + tools for the rest
+# ---------------------------------------------------------------------------
+def dashboard_snapshot() -> str:
+    """Compact, always-fresh overview injected into the system prompt each turn."""
+    q, s = db.query, db.scalar
+    batches = q("SELECT batch, batch_slug, COUNT(*) n, MAX(scraped_at) synced, SUM(researched_at IS NOT NULL) r "
+                "FROM companies GROUP BY batch_slug ORDER BY batch_slug DESC")
+    conf = {r["confidence"]: r["n"] for r in q("SELECT confidence, COUNT(*) n FROM contacts GROUP BY confidence")}
+    stages = {r["stage"]: r["n"] for r in q("SELECT stage, COUNT(*) n FROM companies GROUP BY stage")}
+    out = {r["status"]: r["n"] for r in q("SELECT status, COUNT(*) n FROM outreach GROUP BY status")}
+    top = q("SELECT name, fit_score FROM companies WHERE fit_score IS NOT NULL ORDER BY fit_score DESC, name LIMIT 8")
+    running = q("SELECT id, kind, label, progress, total FROM runs WHERE status='running' ORDER BY id DESC")
+    last = db.one("SELECT id, kind, label, status, summary, finished_at FROM runs WHERE status!='running' ORDER BY id DESC LIMIT 1")
+    st = db.all_settings()
+    verified_cos = s("SELECT COUNT(DISTINCT company_id) FROM contacts WHERE confidence IN ('verified','inferred')")
+    remote_roles = s("SELECT COUNT(*) FROM jobs WHERE active=1 AND lower(COALESCE(location,'')) LIKE '%remote%'")
+    with_phone = s("SELECT COUNT(*) FROM companies WHERE COALESCE(phones,'[]') NOT IN ('','[]') OR COALESCE(whatsapp,'[]') NOT IN ('','[]')")
+    lines = [
+        f"Companies: {s('SELECT COUNT(*) FROM companies')} | founders: {s('SELECT COUNT(*) FROM founders WHERE is_active=1')}"
+        f" | AI-researched: {s('SELECT COUNT(*) FROM companies WHERE researched_at IS NOT NULL')}",
+        "Batches loaded: " + ("; ".join(f"{b['batch']} ({b['batch_slug']}) {b['n']} companies, synced {b['synced'] or 'never'}, {b['r']} researched" for b in batches) or "none"),
+        f"Emails: {sum(conf.values())} total ({', '.join(f'{k} {v}' for k, v in conf.items())}); "
+        f"companies with a verified/inferred contact: {verified_cos}",
+        f"Hiring: {s('SELECT COUNT(DISTINCT company_id) FROM jobs WHERE active=1')} companies, {s('SELECT COUNT(*) FROM jobs WHERE active=1')} open roles "
+        f"({remote_roles} remote)",
+        f"Published phone/WhatsApp: {with_phone} companies",
+        "Top fits: " + (", ".join(f"{t['name']} {t['fit_score']}" for t in top) or "none scored"),
+        "Stages: " + (", ".join(f"{k} {v}" for k, v in stages.items()) or "none"),
+        "Outreach: " + (", ".join(f"{k} {v}" for k, v in out.items()) or "nothing drafted yet")
+        + f" | sent today {outreach.sent_today()} of {st.get('daily_send_limit')} daily limit",
+        "Running jobs: " + (", ".join(f"#{r['id']} {r['label']} {r['progress']}/{r['total']}" for r in running) or "none")
+        + (f" | last finished: #{last['id']} {last['label']} ({last['status']}): {last['summary'] or ''}" if last else ""),
+        f"Integrations: AI {ai.model_label() if config.ai_enabled() else 'off'}; email sending {'on (' + (config.FROM_EMAIL or '') + ')' if config.smtp_enabled() else 'off'}; "
+        f"reply tracking {'on' if config.imap_enabled() else 'off'}; Google Sheets {'on' if config.sheets_enabled() else 'off'}",
+        f"Rules: {st.get('send_delay_seconds')}s between emails, follow-up after {st.get('followup_after_days')} days, max {st.get('max_followups')} follow-ups, "
+        f"auto follow-ups {'on' if st.get('auto_followups') else 'off'}, auto-sync {'every ' + str(st.get('auto_sync_hours')) + 'h' if st.get('auto_sync_enabled') else 'off'}",
+    ]
+    return "\n".join(lines)
+
+
+EXTRA_TOOLS = [
+    {
+        "name": "search_jobs",
+        "description": "Search open job postings across all companies (title, location, salary, equity, visa, link, company fit).",
+        "input_schema": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "Matched against job title and company name, e.g. 'ML engineer'."},
+            "remote_only": {"type": "boolean"},
+            "role": {"type": "string", "description": "YC role category, e.g. Engineering, Sales, Operations, Product, Science."},
+            "batches": {"type": "array", "items": {"type": "string"}},
+            "limit": {"type": "integer"}}},
+    },
+    {
+        "name": "search_people",
+        "description": "Find founders by name, title or email, with their company, title, best email (confidence) and LinkedIn.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["text"]},
+    },
+    {
+        "name": "get_outreach",
+        "description": "Read one email in full (to, subject, body, status, dates, error) by outreach id.",
+        "input_schema": {"type": "object", "properties": {"outreach_id": {"type": "integer"}}, "required": ["outreach_id"]},
+    },
+    {
+        "name": "update_draft",
+        "description": "Edit the subject and/or body of a draft email (only status draft). Use when the user asks to rewrite or tweak a draft.",
+        "input_schema": {"type": "object", "properties": {"outreach_id": {"type": "integer"}, "subject": {"type": "string"}, "body": {"type": "string"}}, "required": ["outreach_id"]},
+    },
+    {
+        "name": "cancel_drafts",
+        "description": "Cancel draft or approved (not yet sent) emails by id.",
+        "input_schema": {"type": "object", "properties": {"outreach_ids": {"type": "array", "items": {"type": "integer"}}}, "required": ["outreach_ids"]},
+    },
+    {
+        "name": "list_runs",
+        "description": "Recent pipeline jobs (sync, research, drafts, send, replies) with status, progress, summary and the last log lines. Use to answer 'is the sync done?' or 'what failed?'.",
+        "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}, "run_id": {"type": "integer"}}},
+    },
+    {
+        "name": "get_settings",
+        "description": "The user's settings: email templates, follow-up template, sending limits, footer, strengths used for fit scoring, automation switches. No secrets.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "analytics",
+        "description": "Breakdowns for charts and comparisons: companies by industry, by batch, by team size, open roles by category, fit score distribution, email confidence by batch, outreach funnel.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+TOOLS.extend(EXTRA_TOOLS)
+
+
+def _search_jobs(args: dict) -> list[dict]:
+    where, params = ["j.active=1"], []
+    if args.get("text"):
+        t = f"%{args['text'].lower()}%"
+        where.append("(lower(j.title) LIKE ? OR lower(c.name) LIKE ?)")
+        params += [t, t]
+    if args.get("remote_only"):
+        where.append("lower(COALESCE(j.location,'')) LIKE '%remote%'")
+    if args.get("role"):
+        where.append("lower(COALESCE(j.role,''))=?")
+        params.append(args["role"].lower())
+    if args.get("batches"):
+        clause, p = _batch_filter(args["batches"])
+        where.append(clause)
+        params += p
+    limit = max(1, min(int(args.get("limit") or 40), 200))
+    return db.query(
+        f"""SELECT c.name AS company, c.id AS company_id, c.batch, c.fit_score, j.title, j.role, j.location, j.type,
+                   j.salary, j.equity, j.experience, j.visa, j.posted, j.url
+            FROM jobs j JOIN companies c ON c.id=j.company_id WHERE {' AND '.join(where)}
+            ORDER BY COALESCE(c.fit_score,0) DESC, c.name LIMIT ?""", params + [limit])
+
+
+def _search_people(args: dict) -> list[dict]:
+    t = f"%{(args.get('text') or '').lower()}%"
+    limit = max(1, min(int(args.get("limit") or 20), 100))
+    rows = db.query(
+        """SELECT f.id AS founder_id, f.name, f.title, f.linkedin_url, f.twitter_url, c.name AS company, c.id AS company_id, c.batch
+           FROM founders f JOIN companies c ON c.id=f.company_id
+           WHERE f.is_active=1 AND (lower(f.name) LIKE ? OR lower(COALESCE(f.title,'')) LIKE ?
+                 OR EXISTS (SELECT 1 FROM contacts ct WHERE ct.founder_id=f.id AND lower(ct.email) LIKE ?))
+           ORDER BY c.fit_score DESC LIMIT ?""", (t, t, t, limit))
+    for r in rows:
+        best = db.one("""SELECT email, confidence FROM contacts WHERE founder_id=? ORDER BY
+                         CASE confidence WHEN 'verified' THEN 0 WHEN 'inferred' THEN 1 WHEN 'likely' THEN 2 ELSE 3 END LIMIT 1""",
+                      (r["founder_id"],))
+        r["best_email"] = f"{best['email']} ({best['confidence']})" if best else None
+    return rows
+
+
+def _list_runs(args: dict) -> list[dict] | dict:
+    if args.get("run_id"):
+        r = db.one("SELECT * FROM runs WHERE id=?", (int(args["run_id"]),))
+        if not r:
+            return {"error": "job not found"}
+        r["log"] = "\n".join((r.get("log") or "").splitlines()[-40:])
+        return r
+    limit = max(1, min(int(args.get("limit") or 8), 50))
+    rows = db.query("SELECT id, kind, label, status, progress, total, summary, started_at, finished_at, log FROM runs ORDER BY id DESC LIMIT ?", (limit,))
+    for r in rows:
+        r["log_tail"] = "\n".join((r.pop("log") or "").splitlines()[-6:])
+    return rows
+
+
+SAFE_SETTINGS = ("sender_profile", "outreach_goal", "email_tone", "template_subject", "template_body", "followup_subject",
+                 "followup_body", "signature_footer", "physical_address", "daily_send_limit", "send_delay_seconds",
+                 "followup_after_days", "max_followups", "auto_followups", "auto_sync_enabled", "auto_sync_hours",
+                 "auto_sync_batches", "auto_research_new", "auto_sheet_sync", "fit_strengths", "default_proof_line", "memory_enabled")
+
+
+def _analytics() -> dict:
+    q = db.query
+    return {
+        "companies_by_industry": q("SELECT COALESCE(industry,'Unknown') industry, COUNT(*) n FROM companies GROUP BY 1 ORDER BY n DESC"),
+        "companies_by_batch": q("SELECT batch, COUNT(*) n, SUM(researched_at IS NOT NULL) researched FROM companies GROUP BY batch ORDER BY batch_slug DESC"),
+        "team_size": q("""SELECT CASE WHEN team_size IS NULL THEN 'unknown' WHEN team_size<=2 THEN '1-2' WHEN team_size<=5 THEN '3-5'
+                          WHEN team_size<=10 THEN '6-10' WHEN team_size<=50 THEN '11-50' ELSE '50+' END bucket, COUNT(*) n
+                          FROM companies GROUP BY 1 ORDER BY MIN(COALESCE(team_size,9999))"""),
+        "open_roles_by_category": q("SELECT COALESCE(role,'Other') role, COUNT(*) n, SUM(lower(COALESCE(location,'')) LIKE '%remote%') remote FROM jobs WHERE active=1 GROUP BY 1 ORDER BY n DESC"),
+        "fit_distribution": q("""SELECT CASE WHEN fit_score>=60 THEN 'strong 60+' WHEN fit_score>=35 THEN 'medium 35-59' ELSE 'weak <35' END band,
+                                 COUNT(*) n FROM companies GROUP BY 1"""),
+        "email_confidence_by_batch": q("""SELECT c.batch, ct.confidence, COUNT(*) n FROM contacts ct JOIN companies c ON c.id=ct.company_id
+                                          GROUP BY c.batch, ct.confidence ORDER BY c.batch"""),
+        "outreach_funnel": q("SELECT step, status, COUNT(*) n FROM outreach GROUP BY step, status ORDER BY step"),
+    }
+
+
+def _extra_tool(name: str, args: dict, ctx: dict):
+    if name == "search_jobs":
+        return _search_jobs(args)
+    if name == "search_people":
+        return _search_people(args)
+    if name == "get_outreach":
+        r = db.one("""SELECT o.*, c.name AS company FROM outreach o JOIN companies c ON c.id=o.company_id WHERE o.id=?""",
+                   (int(args["outreach_id"]),))
+        return r or {"error": "email not found"}
+    if name == "update_draft":
+        oid = int(args["outreach_id"])
+        row = db.one("SELECT status FROM outreach WHERE id=?", (oid,))
+        if not row:
+            return {"error": "email not found"}
+        if row["status"] != "draft":
+            return {"error": f"only drafts can be edited (this one is {row['status']})"}
+        if args.get("subject"):
+            db.execute("UPDATE outreach SET subject=? WHERE id=?", (args["subject"].strip(), oid))
+        if args.get("body"):
+            db.execute("UPDATE outreach SET body=? WHERE id=?", (outreach._tidy_body(args["body"]), oid))
+        ctx["changed"] = True
+        return {"updated": True, "outreach_id": oid}
+    if name == "cancel_drafts":
+        n = 0
+        for oid in [int(i) for i in args.get("outreach_ids") or []]:
+            n += 1 if db.one("SELECT 1 FROM outreach WHERE id=? AND status IN ('draft','approved')", (oid,)) else 0
+            db.execute("UPDATE outreach SET status='cancelled' WHERE id=? AND status IN ('draft','approved')", (oid,))
+        ctx["changed"] = True
+        return {"cancelled": n}
+    if name == "list_runs":
+        return _list_runs(args)
+    if name == "get_settings":
+        st = db.all_settings()
+        return {k: st.get(k) for k in SAFE_SETTINGS}
+    if name == "analytics":
+        return _analytics()
+    return None
+
+
 def _run_tool(name: str, args: dict, ctx: dict) -> object:
+    extra = _extra_tool(name, args, ctx)
+    if extra is not None:
+        return extra
     if name == "search_companies":
         return search_companies(args)
     if name == "get_company":
@@ -382,6 +598,14 @@ TOOL_LABELS = {
     "research_companies": "Starting AI research",
     "stats": "Reading database stats",
     "remember": "Saving to memory",
+    "search_jobs": "Searching jobs",
+    "search_people": "Searching people",
+    "get_outreach": "Reading email",
+    "update_draft": "Editing draft",
+    "cancel_drafts": "Cancelling emails",
+    "list_runs": "Checking pipeline jobs",
+    "get_settings": "Reading settings",
+    "analytics": "Crunching numbers",
     "forget": "Updating memory",
 }
 
@@ -422,6 +646,15 @@ def _tool_summary(name: str, out: object) -> str:
         return f"{out.get('approved', 0)} approved"
     if name == "request_send" and isinstance(out, dict):
         return f"{out.get('approved_in_queue', 0)} ready to send"
+    if name in ("search_jobs", "search_people", "list_runs") and isinstance(out, list):
+        unit = {"search_jobs": "job", "search_people": "person", "list_runs": "job run"}[name]
+        return f"{len(out)} {unit}{'' if len(out) == 1 else ('people' if unit == 'person' else 's')}".replace("personpeople", "people")
+    if name == "get_outreach" and isinstance(out, dict):
+        return f"{out.get('company', '')} ({out.get('status', '')})"
+    if name == "update_draft":
+        return "draft updated"
+    if name == "cancel_drafts" and isinstance(out, dict):
+        return f"{out.get('cancelled', 0)} cancelled"
     if name == "remember" and isinstance(out, dict):
         return "already remembered" if out.get("duplicate") else "saved"
     if name == "forget" and isinstance(out, dict):
@@ -634,7 +867,8 @@ def _run_turn(history: list[T.Content], message: str, ctx: dict) -> Iterator[dic
     system = SYSTEM.format(today=date.today().isoformat(),
                            profile=(settings.get("sender_profile") or "(not filled in yet)")[:6000],
                            goal=settings.get("outreach_goal") or "",
-                           memory=_memory_block(memory_on))
+                           memory=_memory_block(memory_on),
+                           snapshot=dashboard_snapshot())
     base = dict(system_instruction=system, tools=_declarations(memory_on),
                 thinking_config=T.ThinkingConfig(include_thoughts=True))
 
